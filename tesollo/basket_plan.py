@@ -30,8 +30,13 @@ import plate_plans as pp
 # hand axis is horizontal and the plate centre sits 16 cm along it, 8 cm off it: a 20 cm cylinder runs through the held
 # plate itself (every insert refused, 10/27), so only the palm (12 cm) is modelled; the fingers hold the top rim.
 HAND_LENGTH_M, HAND_RADIUS_M = 0.12, 0.06
+PLATE_SHIFT_M = (0.0, 0.05) # (보스 10/27 real Q3) the hand must end 5 cm further toward base +y: the real plate sits that
+                            # much -y of the model in the hand at the insert, so H is corrected by it (a 2nd pass in the insert
+                            # pose's tool frame) and the same gap is planned again; moving the target instead put the model
+                            # plate into the basket wall (38/38 refused)
 BOWL_HEIGHT_M = 0.07        # perceive gives the bowl rim top (10/27 ref 0.072 m on the table): bottom = top - this
-BOWL_DROP_M = 0.03          # bowl bottom above the basket rim when it is let go
+BOWL_DROP_M = -0.07         # bowl bottom vs the basket rim when it is let go (보스 10/27 real Q3: +3 cm stopped 10 cm too high)
+BOWL_SHIFT_M = (0.0, 0.10)  # + this (base xy) on the quadrant middle (보스 10/27 real Q3: 10 cm more toward robot +y)
 BOWL_RISE_M = 0.22          # lift (and above-basket height): the bowl bottom must clear the rim (0.144 m) + 5 cm on the carry
 # basket frame quadrant extents (calibration/demo_watch.py HALF / SPLIT): x near (-0.265, 0.035) / far (0.035, 0.265),
 # y left (0.0095, 0.26) / right (-0.26, 0.0095)
@@ -113,7 +118,7 @@ def bowl_plan(a, k, Tbb, Tbc):
     bottom = np.array([A['obj_centre'][0] + a.dx, A['obj_centre'][1] + a.dy, A['obj_centre'][2] - BOWL_HEIGHT_M])
     p_b = np.linalg.inv(Tg) @ np.r_[bottom, 1.0]                 # bowl bottom in the flange frame (held)
     model_qd = pp.robot_quadrants(Tbb)[a.quadrant]
-    target = (Tbb @ np.r_[QUAD_XY[model_qd], 0.0, 1.0])[:3] + [0.0, 0.0, BOWL_DROP_M]
+    target = (Tbb @ np.r_[QUAD_XY[model_qd], 0.0, 1.0])[:3] + [BOWL_SHIFT_M[0], BOWL_SHIFT_M[1], BOWL_DROP_M]
     yaw = np.arctan2(target[1], target[0]) - np.arctan2(bottom[1], bottom[0])      # turn with joint 1
     Tp = rz(yaw) @ Tg                                             # the grasp turned about base z: where the bowl bottom goes
     above_xyz = Tp[:3, 3] + (target - (Tp @ p_b)[:3]) + [0.0, 0.0, a.rise]
@@ -172,6 +177,9 @@ def main():
     p.add_argument('--dx', type=float, default=0.0)
     p.add_argument('--dy', type=float, default=0.0)
     p.add_argument('--plate', type=float, nargs=3, help='plate centre (base, m) at the grasp; default: saved reference + dx/dy')
+    p.add_argument('--centre_h', type=float, default=0.185,
+                   help='plate centre above the basket floor at the end of the descent [m] (smaller = deeper); 0.185 = the 2F-85 '
+                        'demo (--sim_q: centre_h 0.165 + real dh 0.020)')
     p.add_argument('--rise', type=float, default=0.12, help='lift before the carry (arm_plan.py lift)')
     p.add_argument('--basket', default=str(HERE.parent / 'calibration/data/basket/demo_basket_fixed.json'))
     a = p.parse_args()
@@ -214,7 +222,15 @@ def main():
           f'plate centre {np.round(centre, 3).tolist()}', flush=True)
     grasp_legs = {'to_grasp': [home, list(map(float, grasp))], 'lift': [list(map(float, w)) for w in lift]}
     path, rep = pp.quadrant_plan(Tbb, model_qd, gap, H, tool, list(map(float, lift[-1])), Tbc, q, grasp_legs=grasp_legs,
-                                 grasp_deg=list(map(float, grasp)))
+                                 grasp_deg=list(map(float, grasp)), centre_h=a.centre_h)
+    if path is not None and any(PLATE_SHIFT_M):
+        end = json.loads(Path(path).read_text())['legs']['descend']['waypoints_deg'][-1]
+        R = (k.fk(np.radians(end)) @ tool)[:3, :3]
+        C = np.eye(4)
+        C[:3, 3] = R.T @ -np.array([PLATE_SHIFT_M[0], PLATE_SHIFT_M[1], 0.0])
+        H = C @ H                                                   # plate in the tool frame, moved -shift (base) at the insert
+        path, rep = pp.quadrant_plan(Tbb, model_qd, gap, H, tool, list(map(float, lift[-1])), Tbc, q, grasp_legs=grasp_legs,
+                                     grasp_deg=list(map(float, grasp)), centre_h=a.centre_h)
     if path is None:
         sys.exit(f'NO PLAN: ' + str(__import__('collections').Counter(t[1].split(' ')[0] for t in rep.get('tried', []))) + f' over {len(rep.get("tried", []))} tries')
     plan = json.loads(Path(path).read_text())

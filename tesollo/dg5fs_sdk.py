@@ -73,12 +73,13 @@ def mover(plan, leg, v):
     return r.returncode == 0
 
 
-def basket(obj, quadrant, pin):
+def basket(obj, quadrant, pin, centre_h=None):
     """While the object is held: basket_plan.py (plate: plate_plans' basket planner with the Tesollo grasp, into the pins;
     bowl: upright into the middle of a quadrant), then lift, to_above and descend (Enter per leg); BASKET['down'] once
     the descend has run, so 'release' knows the object is in the basket."""
     out = subprocess.run([str(PLAN_PY), str(REPO / 'tesollo/basket_plan.py'), '--object', obj, '--quadrant', quadrant,
-                          '--pin', str(pin), '--dx', str(SHIFT[0]), '--dy', str(SHIFT[1])], capture_output=True, text=True)
+                          '--pin', str(pin), '--dx', str(SHIFT[0]), '--dy', str(SHIFT[1])]
+                         + (['--centre_h', str(centre_h)] if centre_h is not None else []), capture_output=True, text=True)
     print('\n'.join(l for l in out.stdout.splitlines() if l.startswith(('basket', 'OK', '  ', 'merged'))), flush=True)
     m = re.search(r'^plan: (\S+)', out.stdout, re.M)
     if out.returncode or not m:
@@ -295,7 +296,7 @@ def main():
                 elif cmd.startswith('basket') and a.object:                 # plate: basket Q3 6, bowl: basket Q1
                     w, obj = cmd.split(), 'plate' if a.object == 'plate' else 'bowl'
                     basket(obj, w[1].upper() if len(w) > 1 else ('Q3' if obj == 'plate' else 'Q1'),
-                           int(w[2]) if len(w) > 2 else 6)
+                           int(w[2]) if len(w) > 2 else 6, float(w[3]) if len(w) > 3 else None)   # basket Q3 6 0.15 = deeper
                 elif cmd == 'descend' and BASKET:                          # only after a stopped basket run
                     BASKET['down'] = mover(BASKET['plan'], 'descend', VEL[0])
                 elif cmd:                                       # (10/27) 'basket' with a bowl printed joints silently

@@ -5501,3 +5501,4 @@
   보정 없음 실패의 주원인은 행 방향 조준 −1~−2 cm(한 칸 앞). 학습 보정 dx ≈ +1.5 cm. Q3는 y −1.5~−3 cm 쏠림이 남음(오늘 실기 +y 5 cm 보정과 같은 방향). 결과 `rl/logs/hand_basket/{cem_h55_r32,cem_h55_meas}.json`, `eval*.log`.
 - 한계: 손(손가락)–핀 충돌은 시뮬 안 함, 강제 이동 중 핀 관통 가능(Codex CN 검토 중), hang 55° 하나의 계획.
 - 버그: Isaac `app.close()`가 결과 저장 뒤 멈춰 밤 배치가 1시간 정지 → `os._exit(0)`로 수정, 평가만 다시 실행.
+- 23:xx 전 핀 확장(hang 60° 계획, Q3 핀 6–12 + Q4 핀 4–12 = 16핀, 측정 조건 ±5°/±5 mm, 핀당 64): 보정 없음 **111/1024 (11 %)** → CEM 보정 **756/1024 (74 %)**, 핀별 37–54/64. `rl/logs/hand_basket/{job_h60_all.npz,cem_h60_all.json,evalcem_h60_all.log}`.

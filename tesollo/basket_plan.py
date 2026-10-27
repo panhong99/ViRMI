@@ -34,6 +34,10 @@ PLATE_SHIFT_M = (0.0, 0.05) # (보스 10/27 real Q3) the hand must end 5 cm furt
                             # much -y of the model in the hand at the insert, so H is corrected by it (a 2nd pass in the insert
                             # pose's tool frame) and the same gap is planned again; moving the target instead put the model
                             # plate into the basket wall (38/38 refused)
+# (10/27 night) the plate does not stay flat in the 5-finger grasp: 보스 sees it held almost slot-ready, and the planner
+# needs a 96 deg hand turn with a flat plate but 54 / 34 deg if it hangs 40 / 60 deg (Q3 pin 6).  --hang_deg turns H by
+# that about this grasp tool-frame axis (the axis of the 96 deg turn); 0 = flat (the old rule) until it is measured.
+HANG_AXIS = (-0.94, 0.35, 0.01)
 BOWL_HEIGHT_M = 0.07        # perceive gives the bowl rim top (10/27 ref 0.072 m on the table): bottom = top - this
 BOWL_DROP_M = -0.07         # bowl bottom vs the basket rim when it is let go (보스 10/27 real Q3: +3 cm stopped 10 cm too high)
 BOWL_SHIFT_M = (0.0, 0.10)  # + this (base xy) on the quadrant middle (보스 10/27 real Q3: 10 cm more toward robot +y)
@@ -180,6 +184,7 @@ def main():
     p.add_argument('--centre_h', type=float, default=0.185,
                    help='plate centre above the basket floor at the end of the descent [m] (smaller = deeper); 0.185 = the 2F-85 '
                         'demo (--sim_q: centre_h 0.165 + real dh 0.020)')
+    p.add_argument('--hang_deg', type=float, default=0.0, help='plate turned in the hand after the grasp [deg] (see HANG_AXIS)')
     p.add_argument('--rise', type=float, default=0.12, help='lift before the carry (arm_plan.py lift)')
     p.add_argument('--basket', default=str(HERE.parent / 'calibration/data/basket/demo_basket_fixed.json'))
     a = p.parse_args()
@@ -210,6 +215,12 @@ def main():
     tool[2, 3] = HAND_LENGTH_M
     centre = np.array(a.plate) - [0.0, 0.0, 0.015]            # perceive gives the rim top: the plate middle ~1.5 cm lower
     H = hand_plate(k, grasp, centre, tool)
+    if a.hang_deg:
+        from scipy.spatial.transform import Rotation
+        ax = np.array(HANG_AXIS) / np.linalg.norm(HANG_AXIS)
+        Rh = np.eye(4)
+        Rh[:3, :3] = Rotation.from_rotvec(ax * np.radians(a.hang_deg)).as_matrix()
+        H = Rh @ H
     # the gripper pipeline's default carry (pipeline.configure_carry_planner 'direct'): rise / across / drop by rule, no
     # saved prior, no RRT (10/27 보스: the RRT carry from the config's basket_carry_mode looked wrong on the real arm)
     q = dict(pp.C['plate_ik_bc'], tool_length_m=HAND_LENGTH_M, tool_radius_m=HAND_RADIUS_M,

@@ -5473,3 +5473,9 @@
 - `collab/SLOT_CNN_DIRECTION_20261028.md` 작성, 커밋 `91a435d`. 선택 ep02의 교차 실패 3/10은 모두 Q4 시야→Q3이며 각 장도 26/26 tip, whole row 2/2, rows-agree였다. 실패 원인은 누락보다 끝 프레임을 14번째 tip으로 보는 ambiguous endpoint(행 수 1/2/1).
 - 실사진 3장 hard-negative는 probability만 0.640→0.537로 내리고 strict 7/10→6/10으로 악화해 추가 epoch를 중지한다. 재개 시 독립 완전 라벨 24장(설계 수량)과 endpoint/segmentation head를 우선한다.
 - 코드 확인: `demo1103`/`demo1103_fixed`는 `--no_wrist_view`, `region_pins`→`pin_gap`→`quadrant_plan`을 사용하며 slot CNN이나 insert policy에 의존하지 않는다. CNN은 11/3 시연 선행 조건이 아니다.
+
+### 2026-10-27 20:5x Codex — CL Tesollo 바구니 계획 전수 완료
+- 현재 작업트리 `tesollo/basket_plan.py`를 수정하지 않고 CPU plan-only로 plate Q1–Q4 모든 핀 38개와 bowl Q1–Q4 4개를 실행했다. 결과: `outputs/tesollo_basket_sweep_20261028/{table.tsv,summary.md}`.
+- plate 승인 17/38: Q1 1/6(pin 2), Q2 0/8, Q3 7/12(pin 6–12), Q4 9/12(pin 4–12). 실패는 38개 자세 후보가 insert/IK limit/high carry 검사를 모두 통과하지 못한 경우다.
+- 승인 plate도 파지→삽입 plate 법선 회전이 모두 90°, 파지 기준 J4–J6 최대 변화가 112.0–172.8°라 보스 기준 30–45° 이내가 0/17이다. 현재 기본 `hang_deg=0`의 평평한 접시 가정이 실기 파지 자세와 맞지 않는다는 수치 근거다.
+- bowl은 4/4 승인, J4–J6 최대 변화 Q1 38.7°, Q2 36.1°, Q3 21.6°, Q4 23.0°로 모두 45° 이내다. waypoint 합(lift/carry/descend)은 각 49(11/25/13). plan-only라 실기 성공 주장이 아니다.

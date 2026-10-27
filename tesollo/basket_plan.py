@@ -30,7 +30,7 @@ import plate_plans as pp
 # hand axis is horizontal and the plate centre sits 16 cm along it, 8 cm off it: a 20 cm cylinder runs through the held
 # plate itself (every insert refused, 10/27), so only the palm (12 cm) is modelled; the fingers hold the top rim.
 HAND_LENGTH_M, HAND_RADIUS_M = 0.12, 0.06
-PLATE_SHIFT_M = (0.0, 0.05) # (보스 10/27 real Q3) the hand must end 5 cm further toward base +y: the real plate sits that
+PLATE_SHIFT_M = tuple(float(v) for v in __import__('os').environ.get('PLATE_SHIFT', '0 0.05').split()) # (보스 10/27 real Q3) the hand must end 5 cm further toward base +y: the real plate sits that
                             # much -y of the model in the hand at the insert, so H is corrected by it (a 2nd pass in the insert
                             # pose's tool frame) and the same gap is planned again; moving the target instead put the model
                             # plate into the basket wall (38/38 refused)
@@ -184,6 +184,7 @@ def main():
     p.add_argument('--centre_h', type=float, default=0.185,
                    help='plate centre above the basket floor at the end of the descent [m] (smaller = deeper); 0.185 = the 2F-85 '
                         'demo (--sim_q: centre_h 0.165 + real dh 0.020)')
+    p.add_argument('--model', action='store_true', help='ignore a measured plate.in_hand (measure_held.py): flat-plate model')
     p.add_argument('--hang_deg', type=float, default=0.0, help='plate turned in the hand after the grasp [deg] (see HANG_AXIS)')
     p.add_argument('--rise', type=float, default=0.12, help='lift before the carry (arm_plan.py lift)')
     p.add_argument('--basket', default=str(HERE.parent / 'calibration/data/basket/demo_basket_fixed.json'))
@@ -215,7 +216,12 @@ def main():
     tool[2, 3] = HAND_LENGTH_M
     centre = np.array(a.plate) - [0.0, 0.0, 0.015]            # perceive gives the rim top: the plate middle ~1.5 cm lower
     H = hand_plate(k, grasp, centre, tool)
-    if a.hang_deg:
+    measured = 'in_hand' in A and not a.model
+    if measured:                                                  # tesollo/measure_held.py: FP of the held plate
+        H = np.array(A['in_hand']['H'])
+        print(f'plate in the hand: measured {A["in_hand"]["measured"]} (normal {A["in_hand"]["turn_vs_flat_deg"]} deg from '
+              'the flat model); no hang / shift corrections', flush=True)
+    elif a.hang_deg:
         from scipy.spatial.transform import Rotation
         ax = np.array(HANG_AXIS) / np.linalg.norm(HANG_AXIS)
         Rh = np.eye(4)
@@ -234,7 +240,7 @@ def main():
     grasp_legs = {'to_grasp': [home, list(map(float, grasp))], 'lift': [list(map(float, w)) for w in lift]}
     path, rep = pp.quadrant_plan(Tbb, model_qd, gap, H, tool, list(map(float, lift[-1])), Tbc, q, grasp_legs=grasp_legs,
                                  grasp_deg=list(map(float, grasp)), centre_h=a.centre_h)
-    if path is not None and any(PLATE_SHIFT_M):
+    if path is not None and any(PLATE_SHIFT_M) and not measured:
         end = json.loads(Path(path).read_text())['legs']['descend']['waypoints_deg'][-1]
         R = (k.fk(np.radians(end)) @ tool)[:3, :3]
         C = np.eye(4)

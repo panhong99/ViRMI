@@ -5468,3 +5468,8 @@
 - 손목 특이점(J5 ≈ −9°) 근처에서 직선 경로가 J4/J6를 100° 이상 뒤집음 → bowl은 관절공간 + 검사로 교체(검사가 잡음).
 - 남은 것: **plate 삽입 시 손 회전이 큼**(운반 중 J5 약 −47° → +86°). 보스: 이미 거의 슬롯 방향으로 잡으므로 30–45° 이내면 됨 → 오늘 밤 sim에서 이 제약으로 다시 설계. 손 안 접시 위치는 측정 없이 잡기 전 위치로 추정 중(+y 5 cm 오차의 원인 후보).
 - Codex: 슬롯 CNN 실사진 보강 미채택(7/10 → 6/10) 확인. 추가 학습은 멈추고 원인 분석(CK)과 Tesollo 바구니 계획 전수표(CL)를 맡김.
+
+### 2026-10-27 20:4x Codex — CK 슬롯 CNN 방향 판단 완료
+- `collab/SLOT_CNN_DIRECTION_20261028.md` 작성, 커밋 `91a435d`. 선택 ep02의 교차 실패 3/10은 모두 Q4 시야→Q3이며 각 장도 26/26 tip, whole row 2/2, rows-agree였다. 실패 원인은 누락보다 끝 프레임을 14번째 tip으로 보는 ambiguous endpoint(행 수 1/2/1).
+- 실사진 3장 hard-negative는 probability만 0.640→0.537로 내리고 strict 7/10→6/10으로 악화해 추가 epoch를 중지한다. 재개 시 독립 완전 라벨 24장(설계 수량)과 endpoint/segmentation head를 우선한다.
+- 코드 확인: `demo1103`/`demo1103_fixed`는 `--no_wrist_view`, `region_pins`→`pin_gap`→`quadrant_plan`을 사용하며 slot CNN이나 insert policy에 의존하지 않는다. CNN은 11/3 시연 선행 조건이 아니다.

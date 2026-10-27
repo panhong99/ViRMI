@@ -5517,3 +5517,10 @@
   (3) `--sim_corr`로 옮긴 경로를 planner 충돌 검사(held carry / inserting descend, clearance/margin ≥ 1)로 다시 검사하고 실패면 거부: Q3:9 1.81/1.41, Q4:9 1.81/2.21 통과, Q3:6 insert 0.00, Q4:6 0.998 거부.
   (4) sim pin 반경 1.0 mm는 그리퍼 sim과 같은 compliance 대체값(실측 3.5 mm)이라 그리퍼 결과와의 비교에는 차이 아님. 불확실성 범위는 가정값이라는 지적은 맞음 → measure_held.py 반복 측정으로 대체 예정.
   (2) 손 형상 없음·강제 pose: 그대로 한계. `--sim_corr`는 opt-in·plan-only 유지, 보스 실기 명령에 넣지 않음.
+
+### 2026-10-28 01:2x Codex — CO DG-5F-S 손–바구니 충돌 opt-in 평가
+- `rl/hand_basket.py --hand`에 M1013+DG-5F-S URDF articulation을 추가하고 dense flange별 arm IK를 직접 기록해 따라가게 했다. 손은 `plate_pre9`에서 각 손가락 flexion joint 2를 +7° 닫은 근사이며, 손바닥/27개 손 링크와 basket 사이를 링크별 filtered PhysX contact sensor로 측정한다. 접촉력 1 N 이상을 접촉으로 세고 상세 contact separation의 음수 최댓값을 최대 관통으로 env별 저장한다. 커밋 `967bc49`.
+- `tesollo/hand_sim_job.py`는 새 job에만 `arm_q`를 추가한다. `job_h60_all_hand.npz`의 names/model/gap/flange/tool/H/Tbb는 기존 `job_h60_all.npz`와 완전히 동일(1025 flange, 최대 차이 0); 기존 job·CEM 파일은 수정하지 않았다.
+- 평가: `cem_h60_all_exact.json`, hang ±5°, grip 각 축 ±5 mm, tilt ±2°, 16핀×64=1024. strict 원판정(접촉 무시) **594/1024=58.01%**, 손 접촉 **27/1024=2.64%**, 접촉을 실패로 포함한 strict **583/1024=56.93%**. 접촉 표본을 분모에서도 제외하면 **583/997=58.48%**. 접촉은 Q3에서만 검출됐고 strict 성공과 겹친 접촉은 11건이다.
+- 최대 접촉력 148.58 N. PhysX contact separation에서 음수 관통은 없어 기록 최대 관통 **0.00 mm**(contact offset에서 발생한 접촉력은 포함). 결과와 1024개 env별 boolean/force/penetration: `rl/logs/hand_basket/evalcemx_h60_all_hand_r64.json`, 로그 동명 `.log`.
+- 기본 `--hand` 없음은 기존 `job_h60_all.npz`로 smoke 완료(`/tmp/hand_basket_default_regression.json`), 기존 판정·CEM 파일을 바꾸지 않는다. 한계: 닫힘은 실측 관절각이 아닌 +7° 근사이고 접시는 계속 강제 pose라 손–접시 역학은 이번 충돌률에 포함하지 않는다. 실기 성공 근거가 아니다.

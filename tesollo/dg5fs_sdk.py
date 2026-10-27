@@ -61,6 +61,7 @@ def perceive():
 
 
 SHIFT = [0.0, 0.0]          # object shift from the taught spot (perceive), applied to every arm plan of this run
+SIM_CORR = ['']             # (--sim_corr) rl/hand_basket.py CEM json passed to basket_plan.py for the plate
 BASKET = {}                 # the last basket plan of this run (basket_plan.py): its path, for 'descend'
 
 
@@ -79,7 +80,8 @@ def basket(obj, quadrant, pin, centre_h=None):
     the descend has run, so 'release' knows the object is in the basket."""
     out = subprocess.run([str(PLAN_PY), str(REPO / 'tesollo/basket_plan.py'), '--object', obj, '--quadrant', quadrant,
                           '--pin', str(pin), '--dx', str(SHIFT[0]), '--dy', str(SHIFT[1])]
-                         + (['--centre_h', str(centre_h)] if centre_h is not None else []), capture_output=True, text=True)
+                         + (['--centre_h', str(centre_h)] if centre_h is not None else [])
+                         + (['--sim_corr', SIM_CORR[0]] if SIM_CORR[0] and obj == 'plate' else []), capture_output=True, text=True)
     print('\n'.join(l for l in out.stdout.splitlines() if l.startswith(('basket', 'OK', '  ', 'merged'))), flush=True)
     m = re.search(r'^plan: (\S+)', out.stdout, re.M)
     if out.returncode or not m:
@@ -160,10 +162,13 @@ def main():
                                     '7 N (overrides --pre, --mode, --force, --grasp_recipe)')
     p.add_argument('--grasp_recipe', type=int, help='DGManager grasp recipe: mode, position mode, smooth (not its force)')
     p.add_argument('--lock', action='store_true', help='after the grasp, hold the grasping fingers in position mode')
+    p.add_argument('--sim_corr', default='', help='(opt-in, plate) learned insert correction json from rl/hand_basket.py cem '
+                                                  '(absolute path); use after tesollo/measure_held.py')
     p.add_argument('--vel', type=float, default=80.0, help='arm speed deg/s (= deg/s^2) for every arm leg (default 80)')
     p.add_argument('--motion_ms', type=int, default=3000, help='time per pose move [ms] (slow)')
     a = p.parse_args()
     VEL[0] = a.vel
+    SIM_CORR[0] = str(Path(a.sim_corr).resolve()) if a.sim_corr else ''
     held = None
     if a.object == 'auto':
         a.object, SHIFT[0], SHIFT[1] = perceive()

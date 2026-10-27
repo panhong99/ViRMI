@@ -5448,3 +5448,23 @@
 - `sim_v6_cross_realhn`: sim_v5_cross 3,000장 + 실사진 3장 teacher pseudo-positive/수동 negative 100회 반복. `run_v11_realhn`: ep02 초기화, 4 epoch, lr 1e-5. 모든 epoch가 기존 tip 84/84, 영역 안 precision 0.933, Q1 14/14, 번호 오답 0을 유지했다. 최저 끝단 오검출 평균은 ep01의 0.537(기존 0.640)이지만 교차 strict 6/10·ambiguous 5로 기존 7/10·4보다 악화했다. th 0.5는 strict 7/10이나 tip 79/84, Q1 9/14라 폐기했다.
 - 출력 보존 distillation(`run_v12_hardneg_distill`)도 시험했다. tip 83/84, precision 0.954, Q1 13/14, 번호 오답 0이나 교차 strict 6/10, 255/260이라 미채택했다.
 - 결론: 실사진 3장/negative 4점은 끝단 반응을 낮추지만 정상 tip까지 약화한다. 선택 모델은 `run_v10_cross/ep02.pt` 그대로 유지한다. 새 촬영은 요구하지 않았고, 다음 학습은 서로 다른 거리·각도의 독립 끝단 라벨을 더 확보한 뒤 한다. 코드 `113a33b`, 비교 `outputs/slot_cnn_real_hardneg_20261027/{summary.json,comparison.tsv,comparison.png}`.
+
+## 2026-10-27 저녁 정리 (Claude) — Tesollo 핸드 실기: 인식 → 파지 → 바구니
+
+**1. 받은 일 (보스)**: 핸드 파지 자세(DGManager 티칭) 코드화, 로봇팔 경로, 6D/인식 → 파지, 바구니 하강까지 그리퍼와 같은 방식, 속도 기본 80, 저녁: bowl 성공·plate +y 5 cm·손목 회전 30–45° 이내 요구, KIMM 발표 일별 기록(11/24까지).
+
+**2. 작업 설계**
+- 힘 제어 파지: 제조사 DGSDK(`tesollo/dg5fs_sdk.py`). 개발자 모드 함정 3개를 실측으로 해결: 연결 전 콜백 등록(없으면 segfault), 설정 후 0.1 s 뒤 SystemStart(0 s는 NOT_FOUND_MODEL 2/2), 시작 후 PD 게인(P3 D5) 전송(없으면 전류 0 mA).
+- 자세(보스 DGManager 티칭, `tesollo/poses.yaml`): plate = pose0 접근 → pose9 → 5F parallel 7 N, bowl = pose30 → 5F 7 N. 로봇팔 자세 `tesollo/arm_poses.yaml`.
+- 인식(`tesollo/perceive.py`): 고정 D455 + YOLOE 마스크 깊이 중심(base), 잡는 자리 30 cm 안 가장 가까운 물체, 5장 중앙값(퍼짐 ≤ 8 mm). 기준 중심(--save_ref)과의 dx/dy로 가르친 자세 평행이동(≤ 15 cm).
+- 경로: `arm_plan.py`(홈→위 12 cm→수직 하강), `basket_plan.py`(plate: `plate_plans.quadrant_plan` 그대로, carry 'rule' = 그리퍼 파이프라인 기본 direct, lift+to_above를 `merged_plan`으로 한 스플라인; 손은 손바닥 12 cm 원통 모델. bowl: 세운 채 분면 중앙, 관절공간 운반·하강 + 높이/기울기/이탈 검사). `go.sh` = 새 계획 + mover 한 구간. 속도 기본 80°/s(`--vel`).
+
+**3. 결과**
+- 실기: **bowl → 바구니 Q3 성공**(보정 1회: base +y 10 cm, 바닥이 테두리 7 cm 아래). plate: 파지·운반·하강 수행, 삽입 위치 base +y 5 cm 부족 → 손 안 접시 H를 그만큼 보정해 반영(삽입 끝 플랜지 y −62.3 → −12.3 mm, 실기 미확인).
+- 전 구간 mover check-only 통과(plate Q3/Q4 핀 6, Q3 핀 11; bowl Q1–Q4). tests 통과 후 commit 30여 건(4eafbc0까지).
+
+**4. 개선/보완 (AI 실수 → 보스가 실기에서 잡음)**
+- 운반에 설정 파일의 RRT를 씀 → 그리퍼 기본 direct로. '놓기'가 '하강'보다 먼저 가능 → 하강까지 한 번에, 하강 전 놓기는 재확인. 기본 속도 10–20°/s → 80. 계획 30분 만료로 수동 실행 2회 거부 → go.sh.
+- 손목 특이점(J5 ≈ −9°) 근처에서 직선 경로가 J4/J6를 100° 이상 뒤집음 → bowl은 관절공간 + 검사로 교체(검사가 잡음).
+- 남은 것: **plate 삽입 시 손 회전이 큼**(운반 중 J5 약 −47° → +86°). 보스: 이미 거의 슬롯 방향으로 잡으므로 30–45° 이내면 됨 → 오늘 밤 sim에서 이 제약으로 다시 설계. 손 안 접시 위치는 측정 없이 잡기 전 위치로 추정 중(+y 5 cm 오차의 원인 후보).
+- Codex: 슬롯 CNN 실사진 보강 미채택(7/10 → 6/10) 확인. 추가 학습은 멈추고 원인 분석(CK)과 Tesollo 바구니 계획 전수표(CL)를 맡김.

@@ -1,6 +1,9 @@
 """Tesollo hand plate insert in Isaac (10/27 night, 보스: learn the basket insert with the hand in sim).
 
-Plate only: the hand is not simulated.  The plate follows the planned descent rigidly (pose = flange x tool x H_true each
+Plate only by default: the hand is not simulated.  With ``--hand`` the M1013 + DG-5F-S collision geometry follows the
+same dense flange path using arm IK saved in the job; the hand uses plate_pre9 plus a 7 degree flexion closing
+approximation.  Hand-to-basket contact force and PhysX contact separation (negative = penetration) are recorded.
+The plate follows the planned descent rigidly (pose = flange x tool x H_true each
 physics step, like rl/basket/expert.py attach()), is released at the end and settles; the basket is the full parametric
 basket (rl/basket_env).  H_true = the planner's nominal plate-in-hand turned by an unknown hang error about the hang axis,
 shifted by an unknown grip offset and tilted a little (the real in-hand pose is not measured yet).  Per-pin corrections
@@ -43,6 +46,8 @@ def parse():
     p.add_argument('--out', default='')
     p.add_argument('--seed', type=int, default=0)
     p.add_argument('--viewer', action='store_true')
+    p.add_argument('--hand', action='store_true', help='opt-in M1013 + DG-5F-S collision replay (job must contain arm_q)')
+    p.add_argument('--hand_contact_n', type=float, default=1.0, help='hand-basket contact threshold [N]')
     return p.parse_args()
 
 
@@ -54,6 +59,7 @@ def main():
     import isaaclab.sim as sim_utils
     from isaaclab.assets import AssetBaseCfg, RigidObjectCfg
     from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
+    from isaaclab.sensors import ContactSensorCfg
     from isaaclab.utils import configclass
     from scipy.spatial.transform import Rotation as R
     import basket_env as be
@@ -66,6 +72,11 @@ def main():
     FLOOR_B = be.B['full']['floor_z']                            # basket frame (rim = 0)
     names, gap_t = [str(n) for n in J['names']], [int(g) for g in J['gap']]
     flange = np.split(J['flange'], np.cumsum(J['flange_len'])[:-1])
+    arm_q = None
+    if a.hand:
+        if 'arm_q' not in J:
+            raise SystemExit('--hand needs a newly generated job containing arm_q (tesollo/hand_sim_job.py)')
+        arm_q = np.split(J['arm_q'], np.cumsum(J['arm_q_len'])[:-1])
     gaps_b = np.split(J['gaps_b'], np.cumsum(J['gaps_len'])[:-1])
     tool, H_nom, ax, Tbb = J['tool'], J['H_nom'], J['hang_axis'], J['Tbb']
     nj = len(names)
@@ -94,12 +105,33 @@ def main():
                              spawn=sim_utils.GroundPlaneCfg())
         light = AssetBaseCfg(prim_path='/World/light', spawn=sim_utils.DomeLightCfg(intensity=3000.0))
 
+    if a.hand:
+        import hand_env
+        hand_bodies = ['link_mount', 'link_base'] + [f'link_{i}_{j}' for i in range(1, 6) for j in range(1, 5)] \
+                      + [f'link_{i}_tip' for i in range(1, 6)]
+
+        @configclass
+        class HandScene(Scene):
+            robot = hand_env.robot_cfg()
+            # A filtered ContactSensor must address exactly one body per environment.
+            # Keep one sensor per palm/finger link, then aggregate them below.
+            for _body in hand_bodies:
+                locals()[f'hand_contact_{_body}'] = ContactSensorCfg(
+                    prim_path=f'{{ENV_REGEX_NS}}/Robot/{_body}', filter_prim_paths_expr=['{ENV_REGEX_NS}/Basket'],
+                    history_length=1, track_contact_points=True, max_contact_data_count_per_prim=8)
+            del _body
+        SceneType = HandScene
+    else:
+        SceneType = Scene
+
     dt = 1 / 120
     sim = sim_utils.SimulationContext(sim_utils.SimulationCfg(dt=dt, device='cuda:0'))
-    scene = InteractiveScene(Scene(num_envs=N, env_spacing=2.0))
+    scene = InteractiveScene(SceneType(num_envs=N, env_spacing=2.0))
     sim.reset()
     dev = sim.device
     plate = scene['plate']
+    robot = scene['robot'] if a.hand else None
+    hand_sensors = [scene[f'hand_contact_{b}'] for b in hand_bodies] if a.hand else []
     org = scene.env_origins.cpu().numpy()
     verts = np.array([list(map(float, l.split()[1:4])) for l in (RL / 'assets/plate029_simplified.obj').open() if l.startswith('v ')])
     verts = verts[np.linspace(0, len(verts) - 1, min(len(verts), 400)).astype(int)]
@@ -108,6 +140,16 @@ def main():
     root_off[2, 3] = -0.01                                       # plate frame (centre, 1 cm up) -> mesh root (bottom centre)
     pitch = {i: float(np.median(np.diff([g[0] for g in gaps_b[i]]))) for i in range(nj)}
     rng = np.random.default_rng(a.seed)
+    if a.hand:
+        poses_y = yaml.safe_load((RL.parent / 'tesollo/poses.yaml').read_text())
+        hand_q = np.array(poses_y['plate_pre9']['joints_rad'], dtype=np.float32)
+        hand_q[1::4] += math.radians(7.0)                         # force-close approximation: flexion joint 2
+        arm_ids, _ = robot.find_joints('joint_[1-6]')
+        finger_ids, finger_names = robot.find_joints('joint_[1-5]_[1-4]')
+        order = sorted(range(len(finger_names)), key=lambda i: tuple(map(int, finger_names[i].split('_')[1:])))
+        finger_ids = [finger_ids[i] for i in order]
+        if len(arm_ids) != 6 or len(finger_ids) != 20:
+            raise RuntimeError(f'unexpected DG-5F-S joints: arm {len(arm_ids)}, hand {len(finger_ids)}')
 
     def h_true(n):
         """n unknown in-hand poses around H_nom."""
@@ -142,14 +184,59 @@ def main():
         poses_t = torch.tensor(poses, dtype=torch.float32, device=dev)
         lens = torch.tensor([len(flange[j]) for j in job_of], device=dev)
         zero = torch.zeros(N, 6, device=dev)
+        hand_hit = torch.zeros(N, dtype=torch.bool, device=dev)
+        hand_max_force = torch.zeros(N, device=dev)
+        hand_max_pen = torch.zeros(N, device=dev)
+        if a.hand:
+            q_path = np.zeros((N, L, 6), dtype=np.float32)
+            for e in range(N):
+                j = job_of[e]
+                q_path[e, :len(arm_q[j])] = arm_q[j]
+                q_path[e, len(arm_q[j]):] = arm_q[j][-1]
+            q_path_t = torch.tensor(q_path, device=dev)
+            hand_q_t = torch.tensor(hand_q, device=dev).repeat(N, 1)
+
+        def measure_hand_contact():
+            if not a.hand:
+                return
+            for sensor in hand_sensors:
+                fm = sensor.data.force_matrix_w
+                f = torch.linalg.vector_norm(fm, dim=-1).amax(dim=(1, 2))
+                hand_max_force[:] = torch.maximum(hand_max_force, f)
+                hand_hit[:] |= f >= a.hand_contact_n
+                # Detailed PhysX contact data includes signed separation.  Each
+                # single-link sensor has one sensor/filter row per environment.
+                _, _, _, sep, counts, starts = sensor.contact_physx_view.get_contact_data(dt)
+                counts = counts.reshape(N, -1).cpu().numpy()
+                starts = starts.reshape(N, -1).cpu().numpy()
+                sep = sep.reshape(-1).cpu().numpy()
+                for e in np.nonzero(counts.sum(1))[0]:
+                    deepest = 0.0
+                    for c, s in zip(counts[e], starts[e]):
+                        if c:
+                            deepest = max(deepest, float(np.maximum(0.0, -sep[int(s):int(s + c)]).max()))
+                    hand_max_pen[e] = max(float(hand_max_pen[e]), deepest)
         for t in range(n_move + 30):
             i = torch.clamp((torch.tensor(t * a.speed * dt, device=dev) / torch.tensor(step[job_of], device=dev)).long(),
                             max=lens - 1)
             plate.write_root_pose_to_sim(poses_t[torch.arange(N, device=dev), i])
             plate.write_root_velocity_to_sim(zero)
+            if a.hand:
+                q = robot.data.default_joint_pos.clone()
+                q[:, arm_ids] = q_path_t[torch.arange(N, device=dev), i]
+                q[:, finger_ids] = hand_q_t
+                robot.write_joint_state_to_sim(q, torch.zeros_like(q))
+                robot.set_joint_position_target(q)
             scene.write_data_to_sim()
             sim.step(render=a.viewer)
             scene.update(dt)
+            measure_hand_contact()
+        if a.hand:
+            # Release outcome stays comparable with the plate-only baseline: after
+            # measuring insertion clearance, move the hand back to its default pose.
+            q = robot.data.default_joint_pos.clone()
+            robot.write_joint_state_to_sim(q, torch.zeros_like(q))
+            robot.set_joint_position_target(q)
         n_settle = int(a.settle_s / dt)
         for t in range(n_settle):                                # released: the plate falls / settles in the pins
             if t == n_settle - int(1.0 / dt):
@@ -187,6 +274,9 @@ def main():
             landed[e] = kb
         rollout.diag = diag
         rollout.loose = loose
+        rollout.hand_hit = hand_hit.cpu().numpy()
+        rollout.hand_max_force = hand_max_force.cpu().numpy()
+        rollout.hand_max_pen = hand_max_pen.cpu().numpy()
         return ok, landed
 
     t0 = time.time()
@@ -197,7 +287,13 @@ def main():
         corr = np.array([corr_d.get(names[j], [0.0, 0.0, 0.0]) for j in job_of], float)
         ok, landed = rollout(job_of, corr, h_true(N))
         d = rollout.diag
-        res = {names[j]: dict(success=f'{int(ok[job_of == j].sum())}/{per}', loose=f'{int(rollout.loose[job_of == j].sum())}/{per}',
+        collision_free = ok & ~rollout.hand_hit
+        res = {names[j]: dict(success=f'{int(ok[job_of == j].sum())}/{per}',
+                              success_no_hand_contact=f'{int(collision_free[job_of == j].sum())}/{per}' if a.hand else None,
+                              hand_contact=f'{int(rollout.hand_hit[job_of == j].sum())}/{per}' if a.hand else None,
+                              hand_max_force_n=round(float(rollout.hand_max_force[job_of == j].max()), 2) if a.hand else None,
+                              hand_max_penetration_mm=round(float(rollout.hand_max_pen[job_of == j].max()) * 1000, 2) if a.hand else None,
+                              loose=f'{int(rollout.loose[job_of == j].sum())}/{per}',
                               landed=np.bincount(landed[job_of == j] + 1, minlength=14).tolist(),
                               x_err_mm=round(float(np.median(d[job_of == j, 0])) * 1000, 1),
                               y_err_mm=round(float(np.median(d[job_of == j, 1])) * 1000, 1),
@@ -207,7 +303,20 @@ def main():
             print(f'{nm}: {r["success"]} (loose {r["loose"]})  x err {r["x_err_mm"]} mm, y err {r["y_err_mm"]} mm, upright {r["upright"]}, '
                   f'lowest {r["low_mm"]} mm from the rim  (landed gap counts, -1 first: {r["landed"]})', flush=True)
         print(f'total {int(ok.sum())}/{N} (loose {int(rollout.loose.sum())}/{N})  ({time.time() - t0:.0f} s)')
-        out = dict(mode='eval', job=a.job, corr=corr_d, results=res, total=f'{int(ok.sum())}/{N}', args=vars(a))
+        if a.hand:
+            print(f'hand contact {int(rollout.hand_hit.sum())}/{N}; strict collision-free {int(collision_free.sum())}/{N}; '
+                  f'max force {rollout.hand_max_force.max():.2f} N, max penetration {rollout.hand_max_pen.max() * 1000:.2f} mm')
+        samples = ([dict(pin=names[int(job_of[e])], rep=int(e % per), strict_success=bool(ok[e]),
+                         hand_contact=bool(rollout.hand_hit[e]), hand_max_force_n=round(float(rollout.hand_max_force[e]), 4),
+                         hand_max_penetration_mm=round(float(rollout.hand_max_pen[e]) * 1000, 4)) for e in range(N)]
+                   if a.hand else None)
+        out = dict(mode='eval', job=a.job, corr=corr_d, results=res, total=f'{int(ok.sum())}/{N}',
+                   total_no_hand_contact=f'{int(collision_free.sum())}/{N}' if a.hand else None,
+                   hand_contact=f'{int(rollout.hand_hit.sum())}/{N}' if a.hand else None,
+                   hand_max_force_n=float(rollout.hand_max_force.max()) if a.hand else None,
+                   hand_max_penetration_mm=float(rollout.hand_max_pen.max() * 1000) if a.hand else None,
+                   hand_pose=('plate_pre9 + 7 deg on each finger flexion joint_2' if a.hand else None),
+                   samples=samples, args=vars(a))
     else:
         mu = np.zeros((nj, 3))
         sd = np.tile([0.02, 0.01, 0.01], (nj, 1))

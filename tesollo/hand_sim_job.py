@@ -66,16 +66,24 @@ def main():
                 T[:3, 3] = (1 - s) * Fa[:3, 3] + s * Fb[:3, 3]
                 dense.append(T)
         dense.append(F[-1])
+        # The optional full-hand collision replay needs the arm configuration at every
+        # dense flange sample.  Solve it here (where the normal planning kinematics are
+        # already available) and store it in new job files; legacy jobs remain readable.
+        dense_q, seed = [], np.radians(wp[0])
+        for T in dense:
+            seed = k.ik(T, seed)
+            dense_q.append(seed.copy())
         model_qd = pp.robot_quadrants(Tbb)[qd]
         gi = pp.pin_gap(Tbb, model_qd, int(pin))
-        jobs.append(dict(name=spec, model_qd=model_qd, gap=gi, flange=np.array(dense),
+        jobs.append(dict(name=spec, model_qd=model_qd, gap=gi, flange=np.array(dense), arm_q=np.array(dense_q),
                          gaps_b=np.array(gaps[model_qd]), above_deg=wp[0], insert_deg=wp[-1]))
         print(f'{spec}: model {model_qd} gap {gi}, {len(dense)} flange poses over the descent', flush=True)
     out.parent.mkdir(parents=True, exist_ok=True)
     # no object arrays: Isaac's numpy 1.x cannot unpickle numpy 2 arrays -> ragged lists as one array + lengths
     np.savez(out, names=np.array([j['name'] for j in jobs]), model_qd=np.array([j['model_qd'] for j in jobs]),
              gap=np.array([j['gap'] for j in jobs]), flange=np.concatenate([j['flange'] for j in jobs]),
-             flange_len=np.array([len(j['flange']) for j in jobs]), gaps_b=np.concatenate([j['gaps_b'] for j in jobs]),
+             flange_len=np.array([len(j['flange']) for j in jobs]), arm_q=np.concatenate([j['arm_q'] for j in jobs]),
+             arm_q_len=np.array([len(j['arm_q']) for j in jobs]), gaps_b=np.concatenate([j['gaps_b'] for j in jobs]),
              gaps_len=np.array([len(j['gaps_b']) for j in jobs]), tool=tool, H_nom=H_nom, hang=a.hang, hang_axis=ax, Tbb=Tbb)
     print(f'job {out}: {len(jobs)} pins, nominal hang {a.hang} deg')
 

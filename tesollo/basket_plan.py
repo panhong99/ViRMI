@@ -20,6 +20,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / 'calibration'))
+START_CWD = Path.cwd()                  # (relative paths on the command line are resolved against this)
 os.chdir(HERE.parent / 'calibration')   # calib_core / plate_plans read their files relative to calibration/
 import numpy as np
 import yaml
@@ -186,6 +187,9 @@ def main():
                         'demo (--sim_q: centre_h 0.165 + real dh 0.020)')
     p.add_argument('--model', action='store_true', help='ignore a measured plate.in_hand (measure_held.py): flat-plate model')
     p.add_argument('--hang_deg', type=float, default=0.0, help='plate turned in the hand after the grasp [deg] (see HANG_AXIS)')
+    p.add_argument('--sim_corr', default='', help='(opt-in) rl/hand_basket.py cem json: this pin\'s learned (dx, dy, dz) in the '
+                                                  'basket frame -> x_shift (on the config trim), y_extra, centre_h + dz.  Learned '
+                                                  'for one nominal hang with a measured in-hand pose: use with measure_held.py')
     p.add_argument('--rise', type=float, default=0.12, help='lift before the carry (arm_plan.py lift)')
     p.add_argument('--basket', default=str(HERE.parent / 'calibration/data/basket/demo_basket_fixed.json'))
     a = p.parse_args()
@@ -238,9 +242,17 @@ def main():
     print(f'basket {Tbb[:3, 3].round(3).tolist()} from {a.basket}; {a.quadrant} (model {model_qd}) pin {a.pin} -> gap {gap}; '
           f'plate centre {np.round(centre, 3).tolist()}', flush=True)
     grasp_legs = {'to_grasp': [home, list(map(float, grasp))], 'lift': [list(map(float, w)) for w in lift]}
+    kw = {}
+    if a.sim_corr:
+        cj = json.loads((START_CWD / a.sim_corr).read_text())
+        d = cj['corr'].get(f'{a.quadrant}:{a.pin}')
+        if d is None:
+            sys.exit(f'--sim_corr: no correction for {a.quadrant}:{a.pin} in {a.sim_corr}: {sorted(cj["corr"])}')
+        print(f'sim correction {a.quadrant}:{a.pin} (job {cj.get("job")}): dx {d[0] * 1000:+.1f}, dy {d[1] * 1000:+.1f}, '
+              f'dz {d[2] * 1000:+.1f} mm', flush=True)
     path, rep = pp.quadrant_plan(Tbb, model_qd, gap, H, tool, list(map(float, lift[-1])), Tbc, q, grasp_legs=grasp_legs,
-                                 grasp_deg=list(map(float, grasp)), centre_h=a.centre_h)
-    if path is not None and any(PLATE_SHIFT_M) and not measured:
+                                 grasp_deg=list(map(float, grasp)), centre_h=a.centre_h, **kw)
+    if path is not None and any(PLATE_SHIFT_M) and not measured and not a.sim_corr:
         end = json.loads(Path(path).read_text())['legs']['descend']['waypoints_deg'][-1]
         R = (k.fk(np.radians(end)) @ tool)[:3, :3]
         C = np.eye(4)
@@ -248,6 +260,33 @@ def main():
         H = C @ H                                                   # plate in the tool frame, moved -shift (base) at the insert
         path, rep = pp.quadrant_plan(Tbb, model_qd, gap, H, tool, list(map(float, lift[-1])), Tbc, q, grasp_legs=grasp_legs,
                                      grasp_deg=list(map(float, grasp)), centre_h=a.centre_h)
+    if path is not None and a.sim_corr:
+        # (10/28) as rl/hand_basket.py learned it: the planned descent moved by (dx, dy, dz) in the basket frame, the carry
+        # ramped into it.  Through the planner's offsets instead, its wall model refused every candidate (Q3:6: +9.5 mm y)
+        # while the sim plate went in (pin penetration <= 1.1 mm along these paths).
+        plan = json.loads(Path(path).read_text())
+        sh = Tbb[:3, :3] @ np.array(d, float)
+
+        def moved(w, frac):
+            out, prev = [], np.radians(w[0])
+            for qq, f in zip(w, frac):
+                T = k.fk(np.radians(qq))
+                T[:3, 3] += f * sh
+                qn = k.ik(T, prev)
+                assert qn is not None and np.abs(k.fk(qn)[:3, 3] - T[:3, 3]).max() < 1e-3, 'IK failed moving the descent'
+                out.append(np.degrees(qn).tolist())
+                prev = qn
+            assert np.abs(np.diff(np.array(out), axis=0)).max() < 15, 'IK jump moving the descent'
+            return out
+        L = plan['legs']
+        L['to_above']['waypoints_deg'] = moved(L['to_above']['waypoints_deg'], np.linspace(0, 1, len(L['to_above']['waypoints_deg'])))
+        for leg in ('descend', 'ascend'):
+            L[leg]['waypoints_deg'] = moved(L[leg]['waypoints_deg'], np.ones(len(L[leg]['waypoints_deg'])))
+        for leg in ('to_home', 'abort_home'):                    # they start where the moved ascend ends
+            if leg in L:
+                L[leg]['waypoints_deg'][0] = L['ascend']['waypoints_deg'][-1]
+        plan['source'] += f' + sim correction {a.quadrant}:{a.pin} {np.round(np.array(d) * 1000, 1).tolist()} mm'
+        Path(path).write_text(json.dumps(plan, indent=1))
     if path is None:
         sys.exit(f'NO PLAN: ' + str(__import__('collections').Counter(t[1].split(' ')[0] for t in rep.get('tried', []))) + f' over {len(rep.get("tried", []))} tries')
     plan = json.loads(Path(path).read_text())

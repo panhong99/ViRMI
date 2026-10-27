@@ -5524,3 +5524,46 @@
 - 평가: `cem_h60_all_exact.json`, hang ±5°, grip 각 축 ±5 mm, tilt ±2°, 16핀×64=1024. strict 원판정(접촉 무시) **594/1024=58.01%**, 손 접촉 **27/1024=2.64%**, 접촉을 실패로 포함한 strict **583/1024=56.93%**. 접촉 표본을 분모에서도 제외하면 **583/997=58.48%**. 접촉은 Q3에서만 검출됐고 strict 성공과 겹친 접촉은 11건이다.
 - 최대 접촉력 148.58 N. PhysX contact separation에서 음수 관통은 없어 기록 최대 관통 **0.00 mm**(contact offset에서 발생한 접촉력은 포함). 결과와 1024개 env별 boolean/force/penetration: `rl/logs/hand_basket/evalcemx_h60_all_hand_r64.json`, 로그 동명 `.log`.
 - 기본 `--hand` 없음은 기존 `job_h60_all.npz`로 smoke 완료(`/tmp/hand_basket_default_regression.json`), 기존 판정·CEM 파일을 바꾸지 않는다. 한계: 닫힘은 실측 관절각이 아닌 +7° 근사이고 접시는 계속 강제 pose라 손–접시 역학은 이번 충돌률에 포함하지 않는다. 실기 성공 근거가 아니다.
+
+## 2026-10-28 아침 보고
+
+**요약**
+- 된 것: plate 손목 30–45°의 원인 확인(접시가 손 안에서 평평하지 않음, hang 50–60°면 손 회전 34–44°), 들고 있는 접시 측정 도구(`measure_held.py`), Isaac 손 삽입 sim + 핀별 보정 학습(그리퍼 strict 판정 63 %, 손 접촉 2.6 %).
+- 안 된 것: 손 안 접시 자세 실측(실기 필요), sim 성공률은 '거의 무조건' 목표에 못 미침(57–63 %), 보정의 실기 적용은 보류(Codex 검토).
+- 보스가 오늘 할 것: 접시를 잡고 들어 올린 상태에서 `measure_held.py` 1회(가능하면 3회) → 그 값으로 plate 바구니 삽입 재시험.
+
+**1. 받은 일 (10/27 저녁 보스)**
+plate 삽입 +y 5 cm, 손목 회전 30–45° 이내, 오늘 밤 sim에서 핸드 바구니 삽입 학습, Codex 방향 판단, KIMM 일별 기록.
+
+**2. 작업 설계**
+- 손 안 접시 자세: 기존 계획은 접시가 손 안에서 평평하다고 가정(그리퍼 규칙). hang(손 안 기울기)을 변수로 계획 비교(`basket_plan.py --hang_deg`), 실측은 고정 카메라 FoundationPose + 로봇 관절(`measure_held.py`, 그리퍼 lift 후 재계획과 같은 방식) → `arm_poses.yaml plate.in_hand` → basket_plan이 자동 사용.
+- sim(`rl/hand_basket.py`, Isaac): 접시만 계획된 하강을 flange×tool×H_true로 따라가게 하고 놓아서 안착 판정. H_true = 명목(hang 60°)에 오차(측정 조건 ±5°, ±5 mm, ±2°). 핀별 보정(dx, dy, dz)을 CEM으로 학습(사람이 고른 값 아님, sim 성공률 최대화). 판정은 Codex 검토 뒤 그리퍼 `seated/exact`와 동일하게 바꿈. Codex가 손 충돌 형상(--hand)을 추가.
+
+**3. 결과**
+
+| 일 | 결과 |
+|---|---|
+| 손 회전 vs hang (Q3 핀 6) | 0° 96°, 20° 73°, 40° 54°, 60° 34° |
+| Codex CM 전수 (Q3·Q4 24핀) | hang 50/60/70°: 승인 중 손 회전 ≤45° 15/19, 16/18, 14/15 (40°는 0/19) |
+| measure_held 합성 검사 | 평평·60° 매달림 모두 오차 0 |
+| sim 16핀, 보정 없음 → CEM (loose 판정) | 111/1024 (11 %) → 756/1024 (74 %) |
+| 같은 것, 그리퍼 strict 판정으로 재학습 | **1293/2048 (63 %)**, Q3 49–65 %, Q4 64–77 % |
+| 손 충돌 포함 (Codex CO) | 손–바구니 접촉 27/1024 (2.6 %, Q3만), 접촉 포함 strict 583/1024 (57 %) |
+| 손 안 기울기 오차에 따른 성공 (loose) | ±5° 74 %, ±10° 57 %, ±20° 39 % → 측정은 ±5° 수준 필요 |
+| 강제 하강 중 접시–핀 관통 (명목) | 16핀 모두 ≤1.1 mm |
+| `--sim_corr` 경로 재검사 | Q3:9·Q4:9 통과, Q3:6·Q4:6 planner 충돌 검사에서 거부 |
+
+그림·로그: `rl/logs/hand_basket/`, `outputs/tesollo_basket_sweep_20261028/`, `collab/REVIEW_HAND_BASKET_SIM_20261028.md`.
+
+**4. 개선/보완**
+- 가장 큰 미지수는 손 안 접시 자세. 실측 전에는 hang 값도 sim 보정도 가정. 측정 반복(3회)으로 오차 분포도 같이 얻으면 sim 무작위화를 실측으로 바꿀 수 있음(Codex CN 권고 4).
+- sim 한계(Codex CN): 손가락 닫힘은 +7° 근사, 접시는 강제 이동(손–접시 역학 없음). sim 성공률을 실기 성공률로 쓰지 않음. `--sim_corr`는 opt-in·plan-only, 실기 명령에 넣지 않음.
+- 슬롯 CNN(Codex CK): 추가 학습 중지. 11/3 시연은 CNN 없이 동작(확인됨). 재개 조건: 독립 라벨 실사진 ≥24장 + 끝단 판정 구조.
+- 밤 배치 사고: Isaac 종료 대기로 1시간 정지 → 수정(os._exit).
+
+**보스 실행 명령 (로봇 bringup 켜진 상태)**
+```bash
+# 1) 평소처럼 plate를 잡고 'holding>' 상태에서, 다른 터미널(로봇은 정지 상태로):
+~/miniconda3/envs/foundationpose/bin/python ~/pan/6D_pose/tesollo/measure_held.py
+# 2) 그 뒤 holding> 에서 basket Q3 6 (측정된 손 안 자세로 자동 계획)
+```

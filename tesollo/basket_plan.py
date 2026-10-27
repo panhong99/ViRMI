@@ -285,6 +285,16 @@ def main():
         for leg in ('to_home', 'abort_home'):                    # they start where the moved ascend ends
             if leg in L:
                 L[leg]['waypoints_deg'][0] = L['ascend']['waypoints_deg'][-1]
+        # (10/28 Codex CN) the moved path through the planner's own collision gate again: the held plate over the cell /
+        # basket on the carry, the inserting checker on the descent (clearance / margin >= 1, as quadrant_plan)
+        from robot_model import polyline_path
+        held, inserting, _ = pp.quadrant_checkers(Tbc, q, Tbb, H, tool)
+        c_h = held.path_clearance(polyline_path(np.radians(np.array(L['to_above']['waypoints_deg'])), 0.5))
+        c_i = inserting.path_clearance(polyline_path(np.radians(np.array(L['descend']['waypoints_deg'])), 0.5))
+        print(f'sim correction re-check: carry clearance/margin {c_h:.2f}, insert {c_i:.2f}', flush=True)
+        if min(c_h, c_i) < 1.0:
+            sys.exit(f'REFUSED --sim_corr {a.quadrant}:{a.pin}: the moved path fails the planner collision gate '
+                     f'(carry {c_h:.2f}, insert {c_i:.2f} < 1)')
         plan['source'] += f' + sim correction {a.quadrant}:{a.pin} {np.round(np.array(d) * 1000, 1).tolist()} mm'
         Path(path).write_text(json.dumps(plan, indent=1))
     if path is None:

@@ -8,8 +8,11 @@ shifted by an unknown grip offset and tilted a little (the real in-hand pose is 
 the cross-entropy method on the sim success rate under that randomisation.
     env -u CONDA_PREFIX ... ~/isaacsim-5.1.0/python.sh hand_basket.py eval --job logs/hand_basket/job_h55.npz
     ... hand_basket.py cem --job logs/hand_basket/job_h55.npz --iters 8 --pop 16 --reps 8
-Success: settled plate centre over the target gap (|x - gap| < half a pitch), in its pin pair (|y - pair| < 6 cm),
-standing in the rows (normal within 40 deg of the basket x axis), lowest point >= 7 cm under the rim.
+Success (10/28, Codex CN: the gripper's rl/basket seated/exact, basket.yaml success): lowest rim point within
+bottom_tol (8.5 mm) of the target gap line, plate centre within centre_tol (30 mm) of the pin pair, lowest point <= 55 mm
+over the floor, plate plane within 20 deg of the tine plane (quadrant tine lean, either sign), moved < 1 cm in the last
+1 s; landed gap = the gap nearest the lowest rim point.  The old loose test (centre within half a pitch, 6 cm, 40 deg,
+7 cm under the rim) is kept as 'loose' for comparison.
 """
 import argparse
 import json
@@ -57,6 +60,10 @@ def main():
     import yaml
 
     J = np.load(a.job)
+    model_qd = [str(m) for m in J['model_qd']]
+    SUCC = be.B['success']
+    TINE_LEAN = be.B['full']['tine_lean_deg']
+    FLOOR_B = be.B['full']['floor_z']                            # basket frame (rim = 0)
     names, gap_t = [str(n) for n in J['names']], [int(g) for g in J['gap']]
     flange = np.split(J['flange'], np.cumsum(J['flange_len'])[:-1])
     gaps_b = np.split(J['gaps_b'], np.cumsum(J['gaps_len'])[:-1])
@@ -143,7 +150,10 @@ def main():
             scene.write_data_to_sim()
             sim.step(render=a.viewer)
             scene.update(dt)
-        for _ in range(int(a.settle_s / dt)):                    # released: the plate falls / settles in the pins
+        n_settle = int(a.settle_s / dt)
+        for t in range(n_settle):                                # released: the plate falls / settles in the pins
+            if t == n_settle - int(1.0 / dt):
+                p_still = plate.data.root_pos_w.cpu().numpy().copy()
             scene.write_data_to_sim()
             sim.step(render=a.viewer)
             scene.update(dt)
@@ -151,6 +161,8 @@ def main():
         qw = plate.data.root_quat_w.cpu().numpy()
         Rm = R.from_quat(np.c_[qw[:, 1:], qw[:, :1]]).as_matrix()
         ok, landed = np.zeros(N, bool), np.full(N, -1)
+        loose = np.zeros(N, bool)
+        still = np.linalg.norm(plate.data.root_pos_w.cpu().numpy() - p_still, axis=1) < 0.01
         diag = np.zeros((N, 4))                                   # x error to the target gap [m], y error [m], upright, low [m]
         for e in range(N):
             j = job_of[e]
@@ -162,9 +174,19 @@ def main():
             near = abs(gx[k_] - c[0]) < pitch[j] / 2
             landed[e] = k_ if near else -1
             diag[e] = [c[0] - gx[gap_t[j]], c[1] - gaps_b[j][0][1], abs(n_b[0]) > math.cos(math.radians(40)), low]
-            ok[e] = (near and k_ == gap_t[j] and abs(c[1] - gaps_b[j][0][1]) < 0.06 and abs(n_b[0]) > math.cos(math.radians(40))
-                     and low < -0.07)
+            loose[e] = (near and k_ == gap_t[j] and abs(c[1] - gaps_b[j][0][1]) < 0.06
+                        and abs(n_b[0]) > math.cos(math.radians(40)) and low < -0.07)
+            W = Tbi[:3, :3] @ (p[e][:, None] + Rm[e] @ verts.T) + Tbi[:3, 3:]
+            bot = W[:, int(np.argmin(W[2]))]
+            kb = int(np.argmin(np.abs(gx - bot[0])))
+            lean = math.radians(TINE_LEAN[model_qd[j]])
+            nerr = min(math.degrees(math.acos(min(1.0, abs(n_b @ np.array([math.cos(sg * lean), 0.0, math.sin(sg * lean)])))))
+                       for sg in (1, -1))
+            ok[e] = (kb == gap_t[j] and abs(bot[0] - gx[kb]) < SUCC['bottom_tol_m'] and abs(c[1] - gaps_b[j][0][1]) < SUCC['centre_tol_m']
+                     and bot[2] - FLOOR_B < SUCC['max_height_m'] and nerr < SUCC['max_normal_err_deg'] and still[e])
+            landed[e] = kb
         rollout.diag = diag
+        rollout.loose = loose
         return ok, landed
 
     t0 = time.time()
@@ -175,16 +197,16 @@ def main():
         corr = np.array([corr_d.get(names[j], [0.0, 0.0, 0.0]) for j in job_of], float)
         ok, landed = rollout(job_of, corr, h_true(N))
         d = rollout.diag
-        res = {names[j]: dict(success=f'{int(ok[job_of == j].sum())}/{per}',
+        res = {names[j]: dict(success=f'{int(ok[job_of == j].sum())}/{per}', loose=f'{int(rollout.loose[job_of == j].sum())}/{per}',
                               landed=np.bincount(landed[job_of == j] + 1, minlength=14).tolist(),
                               x_err_mm=round(float(np.median(d[job_of == j, 0])) * 1000, 1),
                               y_err_mm=round(float(np.median(d[job_of == j, 1])) * 1000, 1),
                               upright=round(float(d[job_of == j, 2].mean()), 2),
                               low_mm=round(float(np.median(d[job_of == j, 3])) * 1000, 1)) for j in range(nj)}
         for nm, r in res.items():
-            print(f'{nm}: {r["success"]}  x err {r["x_err_mm"]} mm, y err {r["y_err_mm"]} mm, upright {r["upright"]}, '
+            print(f'{nm}: {r["success"]} (loose {r["loose"]})  x err {r["x_err_mm"]} mm, y err {r["y_err_mm"]} mm, upright {r["upright"]}, '
                   f'lowest {r["low_mm"]} mm from the rim  (landed gap counts, -1 first: {r["landed"]})', flush=True)
-        print(f'total {int(ok.sum())}/{N}  ({time.time() - t0:.0f} s)')
+        print(f'total {int(ok.sum())}/{N} (loose {int(rollout.loose.sum())}/{N})  ({time.time() - t0:.0f} s)')
         out = dict(mode='eval', job=a.job, corr=corr_d, results=res, total=f'{int(ok.sum())}/{N}', args=vars(a))
     else:
         mu = np.zeros((nj, 3))

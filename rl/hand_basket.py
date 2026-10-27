@@ -170,6 +170,7 @@ def main():
     t0 = time.time()
     if a.mode == 'eval':
         corr_d = json.loads(Path(a.corr).read_text()) if a.corr else {}
+        corr_d = corr_d.get('corr', corr_d)                      # a cem output file or a bare {pin: [dx, dy, dz]}
         job_of = np.repeat(np.arange(nj), per)
         corr = np.array([corr_d.get(names[j], [0.0, 0.0, 0.0]) for j in job_of], float)
         ok, landed = rollout(job_of, corr, h_true(N))
@@ -211,8 +212,9 @@ def main():
     if a.out:
         Path(a.out).parent.mkdir(parents=True, exist_ok=True)
         Path(a.out).write_text(json.dumps(out, indent=1))
-        print(f'saved {a.out}')
-    app.close()
+        print(f'saved {a.out}', flush=True)
+    import os
+    os._exit(0)                                                  # (10/27) app.close() hung after the results were saved
 
 
 if __name__ == '__main__':

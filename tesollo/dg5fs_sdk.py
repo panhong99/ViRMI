@@ -94,6 +94,7 @@ BASKET = {}                 # the last basket plan of this run (basket_plan.py):
 # DEMO_STATE across runs (one run = one object); a new day or --new_demo starts it empty.
 DEMO_STATE = Path('/tmp/tesollo_demo_state.json')
 GRIPPER = [False, None]     # (--gripper_path [--wrist d4 d5 d6], 보스 10/29) plate: the 2F-85 insert path + a wrist offset
+TAUGHT_IX = [None]          # (--taught [N], 보스 10/29) plate: basket = the taught insert N of taught_inserts.json
 TEACH = [False]             # (--teach, 보스 10/29) plate: the plan stops above the basket, the insert is taught by the pendant
 TAUGHT = REPO / 'tesollo/taught_inserts.json'   # every taught insert: joints + basket pose + plate in the hand
 SEEN = {}                   # quadrant -> 'bowl' / 'plate' / None, the fixed camera at the start of this run (empty_quadrant.py)
@@ -195,7 +196,15 @@ def basket(obj, quadrant, pin, centre_h=None):
     """While the object is held: basket_plan.py (plate: plate_plans' basket planner with the Tesollo grasp, into the pins;
     bowl: upright into the middle of a quadrant), then lift, to_above and descend (Enter per leg); BASKET['down'] once
     the descend has run, so 'release' knows the object is in the basket.  -> None: no plan, False: a leg stopped, True."""
-    out = subprocess.run([str(PLAN_PY), str(REPO / 'tesollo/basket_plan.py'), '--object', obj, '--quadrant', quadrant,
+    if TAUGHT_IX[0] is not None and obj == 'plate':      # (보스 10/29) the pendant-taught insert: lift -> teach 1 -> 2 -> 3
+        out = subprocess.run([str(PLAN_PY), str(REPO / 'tesollo/taught_plan.py'), '--index', str(TAUGHT_IX[0]),
+                              '--dx', str(SHIFT[0]), '--dy', str(SHIFT[1])]
+                             + (['--basket', BASKET_JSON[0]] if BASKET_JSON[0] else []), capture_output=True, text=True)
+        e = json.loads(TAUGHT.read_text())[TAUGHT_IX[0]]
+        quadrant, pin = e['quadrant'], e['pin']
+    else:
+        out = None
+    out = out or subprocess.run([str(PLAN_PY), str(REPO / 'tesollo/basket_plan.py'), '--object', obj, '--quadrant', quadrant,
                           '--pin', str(pin), '--dx', str(SHIFT[0]), '--dy', str(SHIFT[1])]
                          + (['--centre_h', str(centre_h)] if centre_h is not None else [])
                          + (['--sim_corr', SIM_CORR[0]] if SIM_CORR[0] and obj == 'plate' else [])
@@ -203,7 +212,7 @@ def basket(obj, quadrant, pin, centre_h=None):
                          + (['--gripper_path', '--plates'] + [f'{p_["q"]}:{p_["pin"]}' for p_ in load_state()['plates']]
                             + (['--wrist'] + [str(v) for v in GRIPPER[1]] if GRIPPER[1] else []) if GRIPPER[0] and obj == 'plate' else [])
                          + (['--basket', BASKET_JSON[0]] if BASKET_JSON[0] else []), capture_output=True, text=True)
-    print('\n'.join(l for l in out.stdout.splitlines() if l.startswith(('basket', 'OK', '  ', 'merged', 'wrist'))), flush=True)
+    print('\n'.join(l for l in out.stdout.splitlines() if l.startswith(('basket', 'OK', '  ', 'merged', 'wrist', 'carry'))), flush=True)
     m = re.search(r'^plan: (\S+)', out.stdout, re.M)
     if out.returncode or not m:
         print(f'   basket plan failed:\n{out.stdout[-600:]}{out.stderr[-600:]}', flush=True)
@@ -215,12 +224,12 @@ def basket(obj, quadrant, pin, centre_h=None):
     mg = re.search(r'^merged: (\S+plan\.json)', out.stdout, re.M)
     # (보스 10/27, as the 2F-85 pipeline) grasp -> above the basket in ONE spline (lift + to_above), then the descent
     legs = [(mg.group(1), 'lift_carry'), (m.group(1), 'descend')] if mg else [(m.group(1), lg) for lg in BASKET_LEGS]
-    if TEACH[0] and obj == 'plate':                     # (보스 10/29) only up to above the basket; the insert by the pendant
+    if TEACH[0] and obj == 'plate' and TAUGHT_IX[0] is None:   # (보스 10/29) only up to above the basket; the pendant inserts
         legs = [(teach_stop(m.group(1), mg.group(1) if mg else None), 'lift_carry')]
     for plan, leg in legs:
         if not mover(plan, leg, VEL[0]):
             return False
-    if TEACH[0] and obj == 'plate' and not teach_insert(m.group(1), quadrant, pin):
+    if TEACH[0] and obj == 'plate' and TAUGHT_IX[0] is None and not teach_insert(m.group(1), quadrant, pin):
         return False
     BASKET['down'] = True
     record(*BASKET['target'])
@@ -384,6 +393,9 @@ def main():
     p.add_argument('--gripper_path', action='store_true', help='(plate) after the grasp follow the 2F-85 gripper insert path '
                    '(its planner at the measured basket) with a J4-J6 offset; no hand collision check')
     p.add_argument('--wrist', type=float, nargs=3, help='--gripper_path: J4 J5 J6 offset [deg] (default hand - gripper at the lift end)')
+    p.add_argument('--taught', type=int, nargs='?', const=-1, default=None,
+                   help='(plate) "basket" runs the pendant-taught insert N of tesollo/taught_inserts.json (default the last): '
+                        'lift -> teach 1 (over the basket) -> 2 (1 cm over the slot) -> 3 (in the slot); back 3 -> 2 -> 1 -> home')
     p.add_argument('--teach', action='store_true', help='(plate) the arm stops above the basket; teach the insert with the '
                    'pendant, Enter records the joints (tesollo/taught_inserts.json); release, then back the same way + home')
     p.add_argument('--new_demo', action='store_true', help='forget the bowls / plates put in the basket earlier today')
@@ -393,6 +405,7 @@ def main():
     a = p.parse_args()
     VEL[0] = a.vel
     TEACH[0] = a.teach
+    TAUGHT_IX[0] = a.taught
     GRIPPER[:] = [a.gripper_path, a.wrist]
     MOVER_GO[:] = [] if a.leg_enter else MOVER_GO
     WRIST_LESS[0] = a.wrist_less

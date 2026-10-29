@@ -290,6 +290,8 @@ def detect_live(a):
                     time.sleep(0.05)
                     continue
             t0 = time.perf_counter()
+            if Tb is None and a.basket and n_frames % 15 == 0:     # (10/29) the basket file may be written after the start
+                Tb = load_basket(a.basket)
             dets = det(rgb, a.conf)
             ms = (time.perf_counter() - t0) * 1000
             if a.audience:

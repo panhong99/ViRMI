@@ -55,7 +55,7 @@ def measure_basket():
     """(10/29 보스: no basket-position dependency) the basket pose from the fixed D455 without markers, arm at home and
     out of the view (calibration/basket_vision.py --camera fixed); the file every basket plan of this run uses."""
     import math
-    out_json = Path('/tmp') / f'tesollo_basket_{time.strftime("%Y%m%d_%H%M%S")}.json'
+    out_json = Path(BASKET_JSON[0] or Path('/tmp') / f'tesollo_basket_{time.strftime("%Y%m%d_%H%M%S")}.json')
     share = Path('/dev/shm/fixed_latest.npz')               # (10/29) a viewer owns the camera: its shared frames
     cam = 'share' if share.exists() and time.time() - share.stat().st_mtime < 2.0 else 'fixed'
     r = subprocess.run([str(PLAN_PY), str(REPO / 'calibration/basket_vision.py'), '--camera', cam, '--out', str(out_json),
@@ -81,7 +81,7 @@ def start_view():
     share = Path('/dev/shm/fixed_latest.npz')
     if share.exists() and time.time() - share.stat().st_mtime < 2.0:
         print('spectator view already running (shared frames fresh)', flush=True)
-        return
+        return True
     T = subprocess.run([str(PLAN_PY), '-c', 'import sys; sys.path.insert(0, "calibration"); import calib_core as cc; '
                         'print(cc.latest_t_base_cam())'], cwd=str(REPO), capture_output=True, text=True).stdout.strip()
     log = open('/tmp/tesollo_demo_view.log', 'w')
@@ -93,15 +93,21 @@ def start_view():
         time.sleep(0.5)
         if share.exists() and time.time() - share.stat().st_mtime < 2.0:
             print(f'spectator view on (pid {VIEW[0].pid}, log /tmp/tesollo_demo_view.log)', flush=True)
-            return
+            return True
         if VIEW[0].poll() is not None:
             break
     print('   spectator view did not start (see /tmp/tesollo_demo_view.log); this run opens the camera itself', flush=True)
+    return False
 
 
-def perceive():
-    """tesollo/perceive.py (fixed D455 + YOLOE): -> (object, dx, dy) of the object nearest the grasp spot, or exit."""
-    out = subprocess.run([str(PLAN_PY), str(REPO / 'tesollo/perceive.py')], capture_output=True, text=True)
+def perceive(proc=None):
+    """tesollo/perceive.py (fixed D455 + YOLOE): -> (object, dx, dy) of the object nearest the grasp spot, or exit.
+    `proc`: perceive.py already started (Popen, pipes) - its result."""
+    if proc is not None:
+        so, se = proc.communicate()
+        out = subprocess.CompletedProcess(proc.args, proc.returncode, so, se)
+    else:
+        out = subprocess.run([str(PLAN_PY), str(REPO / 'tesollo/perceive.py')], capture_output=True, text=True)
     print('\n'.join(l for l in out.stdout.splitlines() if not l.startswith('RESULT')), flush=True)
     m = re.search(r'^RESULT (plate|bowl) (\S+) (\S+)$', out.stdout, re.M)
     if out.returncode or not m:
@@ -121,6 +127,8 @@ BASKET = {}                 # the last basket plan of this run (basket_plan.py):
 # DEMO_STATE across runs (one run = one object); a new day or --new_demo starts it empty.
 DEMO_STATE = Path('/tmp/tesollo_demo_state.json')
 GRIPPER = [False, None]     # (--gripper_path [--wrist d4 d5 d6], 보스 10/29) plate: the 2F-85 insert path + a wrist offset
+INSERT_VEL = [40.0]         # (보스 10/29) deg/s for the taught insert (1 cm over the slot -> in), --insert_vel
+AUTO = [True]               # (보스 10/29) no Enter between the steps: seen -> approach -> grasp -> basket -> release -> home
 TAUGHT_IX = [None]          # (--taught [N], 보스 10/29) plate: basket = the taught insert N of taught_inserts.json
 TEACH = [False]             # (--teach, 보스 10/29) plate: the plan stops above the basket, the insert is taught by the pendant
 TAUGHT = REPO / 'tesollo/taught_inserts.json'   # every taught insert: joints + basket pose + plate in the hand
@@ -209,11 +217,11 @@ def auto_basket(obj, centre_h=None):
     print('   none of these planned; "basket Q.. pin" picks one by hand', flush=True)
 
 
-def mover(plan, leg, v):
+def mover(plan, leg, v, extra=()):
     """One mover leg (Enter to go); True if it ran."""
     r = subprocess.run(['bash', str(REPO / 'calibration/run.sh'), 'mover', '--plan', plan, '--leg', leg, '--smooth',
                         '--go_per', 'leg', '--vel_deg_s', str(v), '--acc_deg_s2', str(v), '--execute', '--go_enter']
-                       + MOVER_GO)
+                       + MOVER_GO + list(extra))
     if r.returncode:
         print(f'   mover stopped at {leg} (exit {r.returncode})', flush=True)
     return r.returncode == 0
@@ -252,12 +260,13 @@ def basket(obj, quadrant, pin, centre_h=None):
     mg = re.search(r'^merged: (\S+plan\.json)', out.stdout, re.M)
     # (보스 10/27, as the 2F-85 pipeline) grasp -> above the basket in ONE spline (lift + to_above), then the descent
     legs = [(mg.group(1), 'lift_carry'), (m.group(1), 'descend')] if mg else [(m.group(1), lg) for lg in BASKET_LEGS]
-    if 'post_grasp' in planned_legs:                    # (보스 10/29) grasp -> slot as ONE spline (taught_plan.py)
-        legs = [(m.group(1), 'post_grasp')]
+    if 'post_grasp' in planned_legs:                    # (보스 10/29) grasp -> 1 cm over the slot as ONE spline, then the
+        legs = [(m.group(1), 'post_grasp'), (m.group(1), 'insert')]   # insert alone at --insert_vel (taught_plan.py)
     if TEACH[0] and obj == 'plate' and TAUGHT_IX[0] is None:   # (보스 10/29) only up to above the basket; the pendant inserts
         legs = [(teach_stop(m.group(1), mg.group(1) if mg else None), 'lift_carry')]
     for plan, leg in legs:
-        if not mover(plan, leg, VEL[0]):
+        sparse = leg in ('post_grasp', 'insert', 'return_home')   # few knots: the controller spline smooths them
+        if not mover(plan, leg, INSERT_VEL[0] if leg == 'insert' else VEL[0], ['--max_step_deg', '90'] if sparse else []):
             return False
     if TEACH[0] and obj == 'plate' and TAUGHT_IX[0] is None and not teach_insert(m.group(1), quadrant, pin):
         return False
@@ -430,6 +439,8 @@ def main():
                         'lift -> teach 1 (over the basket) -> 2 (1 cm over the slot) -> 3 (in the slot); back 3 -> 2 -> 1 -> home')
     p.add_argument('--teach', action='store_true', help='(plate) the arm stops above the basket; teach the insert with the '
                    'pendant, Enter records the joints (tesollo/taught_inserts.json); release, then back the same way + home')
+    p.add_argument('--insert_vel', type=float, default=40.0, help='deg/s (= deg/s^2) for the last move into the slot (default 40)')
+    p.add_argument('--step', action='store_true', help='(old) Enter before every step and at the release / home')
     p.add_argument('--no_view', action='store_true', help='do not start the spectator view (demo_watch --audience)')
     p.add_argument('--hold', action='store_true', help='after the grasp wait at "holding>" instead of going to the basket')
     p.add_argument('--new_demo', action='store_true', help='forget the bowls / plates put in the basket earlier today')
@@ -439,6 +450,8 @@ def main():
     a = p.parse_args()
     VEL[0] = a.vel
     TEACH[0] = a.teach
+    INSERT_VEL[0] = a.insert_vel
+    AUTO[0] = not (a.step or a.teach or a.hold or not a.object)
     TAUGHT_IX[0] = a.taught if a.taught is not None else (None if a.planner or not TAUGHT.exists() else -1)
     if a.object in ('plate', 'auto') and TAUGHT_IX[0] is not None:
         print(f'plate insert: taught #{TAUGHT_IX[0]} ({TAUGHT.name}), one spline after the grasp (--planner = the planner)', flush=True)
@@ -450,20 +463,28 @@ def main():
     if a.basket_json:
         BASKET_JSON[0] = str(Path(a.basket_json).resolve())
     elif a.object and not a.fixed_basket:
+        # (보스 10/29: the start was slow - four YOLOE loads one after another) the view first (it owns the camera, the
+        # basket file it draws is written by the measurement below from its shared frames), then the quadrants and the
+        # object seen at the same time
+        BASKET_JSON[0] = f'/tmp/tesollo_basket_{time.strftime("%Y%m%d_%H%M%S")}.json'
+        if a.no_view or not start_view():
+            pass
         measure_basket()
     if a.new_demo:
         DEMO_STATE.unlink(missing_ok=True)
-    if a.object and BASKET_JSON[0] and not a.no_view:
-        start_view()
+    seen = None
+    if a.object == 'auto':                                       # perceive.py alongside empty_quadrant.py (both read the share)
+        seen = subprocess.Popen([str(PLAN_PY), str(REPO / 'tesollo/perceive.py')], stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True)
     if a.object and BASKET_JSON[0]:
         see_quadrants()                                          # arm home, the basket in view
         st = load_state()
         print(f'remembered in the basket today: bowls {st["bowls"]}, plates {[(p_["q"], p_["pin"]) for p_ in st["plates"]]}'
               ' (--new_demo clears)', flush=True)
     if a.object == 'auto':
-        a.object, SHIFT[0], SHIFT[1] = perceive()
-        if input(f'\nseen: {a.object}, {SHIFT[0] * 1000:+.0f} / {SHIFT[1] * 1000:+.0f} mm from the taught spot.  '
-                 'Enter = go on, q = stop: ').strip().lower() == 'q':
+        a.object, SHIFT[0], SHIFT[1] = perceive(seen)
+        print(f'\nseen: {a.object}, {SHIFT[0] * 1000:+.0f} / {SHIFT[1] * 1000:+.0f} mm from the taught spot', flush=True)
+        if not AUTO[0] and input('Enter = go on, q = stop: ').strip().lower() == 'q':
             return
     if a.object:
         a.pre, a.mode, held, a.force = object_grasp(a.object)
@@ -514,6 +535,9 @@ def main():
         print(f'  hottest motor {t:.1f} C (J{temp.index(t) + 1})', flush=True)
 
     def ask(what):
+        if AUTO[0]:                                     # (보스 10/29) the object seen -> its steps run on by themselves
+            print(f'\n{what}', flush=True)
+            return
         if input(f'\n{what}  Enter = go, q = stop: ').strip().lower() == 'q':
             raise KeyboardInterrupt
 
@@ -551,8 +575,9 @@ def main():
             check('move', g.move_joint_all(load_pose(APPROACH_HAND[obj])))
             time.sleep(a.motion_ms / 1000 + 0.5)
             show()
-            if input(f'\n0b. arm: home -> above -> down to the taught {obj} grasp pose?  Enter = go, s = skip (arm already '
-                     'there): ').strip().lower() != 's' and not arm_legs(a.object, ARM_APPROACH):
+            print(f'\n0b. arm: home -> above -> down to the taught {obj} grasp pose', flush=True)
+            if (AUTO[0] or input('Enter = go, s = skip (arm already there): ').strip().lower() != 's') and \
+                    not arm_legs(a.object, ARM_APPROACH):
                 raise KeyboardInterrupt
         ask(f'1. move to "{a.pre}" in {a.motion_ms} ms.')
         check('move', g.move_joint_all(pre))
@@ -575,6 +600,9 @@ def main():
                 show()
         if a.object and not a.hold:                       # (보스 10/29) no 'basket' to type: grasp -> basket goes on
             auto_basket('plate' if a.object == 'plate' else 'bowl')
+            if AUTO[0] and BASKET.get('down'):            # in the slot: release, open, back home by itself
+                print('\n3. in the basket: release', flush=True)
+                raise SystemExit(0) from None
         # (보스 10/27) keep the grasp while the arm lifts and goes home in the other terminal: only the typed word
         # 'release' opens the hand; Enter shows joints / currents / temperature, Ctrl+C and q do NOT let go here
         print('\n3. HOLDING.  "home" = lift + home;  "basket" = the empty quadrant by itself (bowl: any empty one; plate: '
@@ -619,16 +647,19 @@ def main():
             check('release', g.grasp(0))
             time.sleep(1.0)
             try:
-                if input('\n4. open the hand (all 0)?  Enter = go, n = leave it: ').strip().lower() != 'n':
+                if AUTO[0] or input('\n4. open the hand (all 0)?  Enter = go, n = leave it: ').strip().lower() != 'n':
                     g.move_joint_all([0.0] * JOINTS)
                     time.sleep(a.motion_ms / 1000 + 0.5)
                     show()
             except EOFError:
                 pass
             try:                                                 # after a basket drop: back up and home with that plan
-                if BASKET and input('\n5. arm: ascend + home with the basket plan?  Enter = go, n = no: ').strip().lower() != 'n':
+                if BASKET and BASKET.get('down') and AUTO[0]:
+                    print('\n5. arm: out of the basket + home', flush=True)
+                if BASKET and ((BASKET.get('down') and AUTO[0]) or
+                               input('\n5. arm: ascend + home with the basket plan?  Enter = go, n = no: ').strip().lower() != 'n'):
                     out_leg = BASKET.get('out_leg', 'ascend')
-                    moved = mover(BASKET['plan'], out_leg, VEL[0])
+                    moved = mover(BASKET['plan'], out_leg, VEL[0], ['--max_step_deg', '90'] if out_leg == 'return_home' else [])
                     if moved and out_leg != 'return_home':
                         mover(BASKET['plan'], 'to_home', VEL[0])
             except EOFError:

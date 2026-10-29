@@ -11,11 +11,9 @@ arm plan.  With --execute it stops after grasping and keeps the hand controller 
     ~/miniconda3/envs/foundationpose/bin/python tesollo/support_grasp180.py --execute
 """
 import argparse
-import json
 import os
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import numpy as np
@@ -119,108 +117,18 @@ def make_plan(a):
     return Path(path)
 
 
-def load_hand_pose(a):
-    poses = yaml.safe_load((HERE / 'poses.yaml').read_text())
-    pre = np.degrees(np.asarray(poses['plate_pre9']['joints_rad'], float))
-    support = pre.copy()
-    contact_path = HERE / 'grasp_contact.json'
-    if contact_path.exists() and 'plate' in (contact := json.loads(contact_path.read_text())):
-        measured = np.asarray(contact['plate']['joints'], float)
-        support[4:] = pre[4:] + a.support_fraction * (measured[4:] - pre[4:])
-        source = f'plate_pre9 + {a.support_fraction:.0%} toward contact {contact["plate"]["time"]}'
-    else:
-        source = 'plate_pre9 (no measured contact file)'
-    # Thumb stays in the open/grasp-ready position. Fingers 2-5 form the fixed support shelf.
-    support[:4] = pre[:4]
-    return support.tolist(), source
-
-
 def execute(a, plan):
-    sys.path.insert(0, a.sdk)
-    from dgsdk import (CommunicationMode, ControlMode, DGGraspMode, DGModel, DGResult, DGSDK, GripperSetting,
-                       GripperSystemSetting, ReceivedDataType)
-
-    support, source = load_hand_pose(a)
-    g = DGSDK()
-    started = False
-
-    def check(name, result):
-        print(f'  {name}: {result.name}', flush=True)
-        if result != DGResult.NONE:
-            raise RuntimeError(f'{name} failed: {result.name}')
-
-    def confirm(text):
-        if input(f'\n{text}  Enter = go, q = stop: ').strip().lower() == 'q':
-            raise KeyboardInterrupt
-
-    def show():
-        d = g.get_gripper_data()
-        q = list(d.joint[:JOINTS])
-        for f in range(5):
-            print(f'  finger {f + 1}' + (' thumb' if f == 0 else '      ') + ': ' +
-                  ' '.join(f'{v:+6.1f}' for v in q[4 * f:4 * f + 4]))
-
-    check('system', g.set_gripper_system(GripperSystemSetting.create(
-        ip=a.ip, port=a.port, control_mode=ControlMode.DEVELOPER, communication_mode=CommunicationMode.ETHERNET)))
-    g.on_connected(lambda: print('  -> connected', flush=True))
-    g.on_disconnected(lambda: print('  -> disconnected', flush=True))
-    check('connect', g.connect_to_gripper())
-    try:
-        check('option', g.set_gripper_option(GripperSetting.create(
-            model=DGModel.DG_5F_S_LEFT, joint_count=0, finger_count=0,
-            received_data_type=[ReceivedDataType.JOINT, ReceivedDataType.CURRENT, ReceivedDataType.TEMPERATURE, 0, 0, 0, 0])))
-        for _ in range(20):
-            time.sleep(0.1)
-            result = g.system_start()
-            if result != DGResult.NOT_FOUND_MODEL:
-                break
-        check('start', result)
-        started = True
-        check('hold target', g.move_joint_all(list(g.get_gripper_data().joint[:JOINTS])))
-        check('PD mode', g.set_control_pid_mode(0))
-        check('gains', g.set_joint_gain_pid_all([3.0] * JOINTS, [5.0] * JOINTS, [0.0] * JOINTS, [0.0] * JOINTS))
-
-        confirm(f'hand: fingers 2-5 to support pose ({source}) in {a.motion_ms} ms; thumb stays ready')
-        check('motion time', g.set_motion_time_all_equal(a.motion_ms))
-        check('support pose', g.move_joint_all(support))
-        time.sleep(a.motion_ms / 1000 + 0.5)
-        show()
-
-        confirm('arm: move through the checked J6-turned approach to the plate')
-        cmd = ['bash', str(CAL / 'run.sh'), 'mover', '--plan', str(plan), '--leg', 'support180_approach', '--smooth',
-               '--go_per', 'leg', '--vel_deg_s', str(a.vel), '--acc_deg_s2', str(a.vel * 0.5), '--execute',
-               '--go_enter', '--spline_time']
-        if subprocess.run(cmd).returncode:
-            raise RuntimeError('arm mover stopped')
-
-        confirm(f'thumb: close gently at {a.force:.1f} N; fingers 2-5 remain position-held')
-        hold = [0] * 4 + [1] * 16
-        check('position mode', g.set_position_mode_all(hold))
-        check('thumb grasp data', g.set_grasp_data(DGGraspMode._5F_2FINGER_1_AND_2, a.force, 0, 1))
-        check('thumb grasp', g.grasp(1))
-        time.sleep(max(2.0, a.motion_ms / 1000))
-        show()
-        print('\nGRASPED AND STOPPED. The arm will not lift or move. Enter shows joints; type "release" to let go.', flush=True)
-        while True:
-            try:
-                cmd = input('  support180> ').strip().lower()
-            except KeyboardInterrupt:
-                print('\n  still holding; type "release" to let go', flush=True)
-                continue
-            if cmd == 'release':
-                break
-            if cmd:
-                print('  only "release" is accepted; the arm remains stopped')
-            show()
-    finally:
-        if started:
-            check('release', g.grasp(0))
-            time.sleep(1.0)
-            if input('open the hand fully? Enter = yes, n = leave support pose: ').strip().lower() != 'n':
-                g.move_joint_all([0.0] * JOINTS)
-                time.sleep(a.motion_ms / 1000 + 0.5)
-            g.system_stop()
-        g.disconnect_to_gripper()
+    """Run the SDK half in its Python, because the planner and DGSDK have different binary dependencies."""
+    worker = HERE / 'support_grasp180_hand.py'
+    probe = subprocess.run([a.hand_python, '-c', 'import cffi, yaml'], capture_output=True, text=True)
+    if probe.returncode:
+        raise RuntimeError(f'hand Python cannot import cffi/yaml: {a.hand_python}\n{probe.stderr.strip()}')
+    cmd = [a.hand_python, str(worker), '--plan', str(plan), '--vel', str(a.vel), '--force', str(a.force),
+           '--support_fraction', str(a.support_fraction), '--motion_ms', str(a.motion_ms),
+           '--sdk', a.sdk, '--ip', a.ip, '--port', str(a.port)]
+    print('hand controller Python:', a.hand_python)
+    if subprocess.run(cmd).returncode:
+        raise RuntimeError('hand/arm experiment stopped')
 
 
 def main():
@@ -236,6 +144,8 @@ def main():
                    help='fingers 2-5: fraction from plate_pre9 toward the last measured contact')
     p.add_argument('--motion_ms', type=int, default=4000, help='hand support-pose motion time [ms]')
     p.add_argument('--sdk', default='/home/pan/pan/tesollo_ws/dg_python-main/src')
+    p.add_argument('--hand_python', default='/home/pan/miniconda3/bin/python3',
+                   help='Python containing cffi for DGSDK; launched after planning')
     p.add_argument('--ip', default='169.254.186.73')
     p.add_argument('--port', type=int, default=502)
     a = p.parse_args()

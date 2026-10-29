@@ -25,6 +25,7 @@ from basket_plan import shifted_grasp
 
 TAUGHT = HERE / 'taught_inserts.json'
 MAX_KNOTS, KNOT_DEG = 20, 30.0
+OBSTACLE_MARGIN_M = 0.015
 
 
 def knots(qs, step=KNOT_DEG):
@@ -35,6 +36,21 @@ def knots(qs, step=KNOT_DEG):
         n = max(1, int(np.ceil(np.abs(b - a).max() / step)))
         out += [(a + (b - a) * i / n).tolist() for i in range(1, n + 1)]
     return out
+
+
+def live_obstacle_clearance(k, waypoints, plate_in_tcp, obstacles):
+    """Dense controller-spline samples of the held plate against live camera OBBs."""
+    if not obstacles:
+        return []
+    qs = pp.equal_time_spline(np.asarray(waypoints, float), per=30)[0]
+    local = pp.plate_cloud(np.asarray(plate_in_tcp, float), np.eye(4))
+    points = np.vstack([local @ F[:3, :3].T + F[:3, 3] for F in (k.fk(np.radians(q)) for q in qs)])
+    clear = []
+    for _, c, size, R in (o[:4] for o in obstacles):
+        L = np.abs((points - np.asarray(c, float)) @ np.asarray(R, float)) - np.asarray(size, float) / 2
+        d = np.linalg.norm(np.maximum(L, 0.0), axis=1) + np.minimum(L.max(1), 0.0)
+        clear.append(float(d.min()))
+    return clear
 
 
 def main():
@@ -64,7 +80,9 @@ def main():
     grasp = np.array(shifted_grasp(k, A['posj_deg'], a.dx, a.dy), float)
     home = list(map(float, pp.C['robot']['home_joints_deg']))
     Tt = np.array(e['basket_T'])
-    Tn = np.array(json.loads(Path(a.basket).read_text())['T']) if a.basket else Tt
+    basket_data = json.loads(Path(a.basket).read_text()) if a.basket else {}
+    Tn = np.array(basket_data['T']) if basket_data else Tt
+    live_obstacles = [o[:4] for o in basket_data.get('basket_obstacles', [])]
     D = Tn @ np.linalg.inv(Tt)                                   # the basket since the teaching
     pin = a.pin or e['pin']
     if pin != e['pin']:                                          # the same quadrant, another gap: along the pin row
@@ -167,6 +185,12 @@ def main():
         carry += [(a2 + (a3 - a2) * i / n_in).tolist() for i in range(1, n_in + 1)]
         back_s = knots(back, a.knot_deg * 1.6)
         legs += [('carry_insert', carry), ('return_home_smooth', back_s)]
+    checked_leg = dict(legs)['carry_insert' if a.smooth else 'post_grasp']
+    clear = live_obstacle_clearance(k, checked_leg, e['plate_in_tcp'], live_obstacles)
+    if clear and min(clear) < OBSTACLE_MARGIN_M:
+        hit = int(np.argmin(clear))
+        sys.exit(f'REFUSED: live basket obstacle {hit + 1} is only {clear[hit] * 1000:.1f} mm from the held plate '
+                 f'(< {OBSTACLE_MARGIN_M * 1000:.0f} mm)')
     for name, w in legs[1:]:
         if len(w) > MAX_KNOTS:
             sys.exit(f'REFUSED: {name} needs {len(w)} knots (> {MAX_KNOTS})')
@@ -178,13 +202,18 @@ def main():
     inside = [b[2] for b in over if abs(b[0]) < 0.30 and abs(b[1]) < 0.30]
     plan = dict(dry_run=True, accepted=True, reasons=[], margin_m=0.0, created=time.strftime('%Y-%m-%d %H:%M:%S'),
                 source=f'taught insert #{a.index} {e["quadrant"]} pin {pin} (taught pin {e["pin"]}, {e["time"]}), {note}; '
-                       'sparse, no collision sweep', basket_T=Tn.tolist(), plate_in_tcp=e.get('plate_in_tcp'), tool_length_m=0.12,
+                       'sparse, live placed-plate check only', basket_T=Tn.tolist(), plate_in_tcp=e.get('plate_in_tcp'),
+                tool_length_m=0.12, obstacles=live_obstacles,
+                obstacle_check=dict(count=len(live_obstacles), margin_m=OBSTACLE_MARGIN_M,
+                                    min_clearance_m=min(clear) if clear else None),
                 legs={n: dict(waypoints_deg=np.round(w, 3).tolist(), min_clearance_straight_m=0.0, planner='taught sparse')
                       for n, w in legs})
     out = pp.DATA / 'rl_plans' / (time.strftime('%Y%m%d_%H%M%S') + f'_{int(time.time() * 1000) % 1000:03d}_hand_taught')
     out.mkdir(parents=True, exist_ok=True)
     (out / 'plan.json').write_text(json.dumps(plan, indent=1))
     print(f'basket: {note}')
+    if live_obstacles:
+        print(f'live basket obstacles: {len(live_obstacles)}, held-plate clearance {min(clear) * 1000:.1f} mm')
     print(f'OK: taught {e["quadrant"]} pin {pin}: post_grasp {len(post)} knots (grasp, up 5 / {a.rise * 100:.0f} cm, teach 1, '
           f'teach 2), insert 3 knots, return_home {len(back)} knots; carry flange over the basket >= '
           f'{min(inside) * 100 if inside else float("nan"):.0f} cm over the rim (TCP not checked)')

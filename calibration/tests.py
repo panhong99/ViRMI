@@ -1819,6 +1819,22 @@ class ObstacleTests(unittest.TestCase):
         self.assertEqual([o[0] for o in pipeline.seen_obstacles([0.905, 0.35])], ['b'])
         pipeline.VISION_OBSTACLES[:] = []
 
+    def test_basket_obstacle_boxes_keep_only_a_plate_inside_the_fitted_basket(self):
+        import basket_vision as bv
+        class Detector:
+            pass
+        det = Detector()
+        h = w = 240
+        yy, xx = np.ogrid[:h, :w]
+        det.plate_masks = [(((xx - 120) / 24) ** 2 + ((yy - 120) / 40) ** 2 < 1, 0.10)]
+        depth = np.ones((h, w), np.float32)
+        K = np.array([[300.0, 0, 120], [0, 300.0, 120], [0, 0, 1.0]])
+        T = np.eye(4)
+        T[2, 3] = 1.0
+        self.assertEqual(len(bv.basket_obstacle_boxes(det, depth, K, np.eye(4), T)), 1)
+        T[0, 3] = 0.5
+        self.assertEqual(bv.basket_obstacle_boxes(det, depth, K, np.eye(4), T), [])
+
 if __name__ == '__main__':
     unittest.main()
 

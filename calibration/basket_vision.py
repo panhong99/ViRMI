@@ -88,6 +88,53 @@ def obstacle_boxes(det, rack, depth, K, Tbc, posj=None, min_conf=0.25, min_point
     return out
 
 
+def basket_obstacle_boxes(det, depth, K, Tbc, Tbb, posj=None, min_conf=0.05, min_points=120, pad=0.012):
+    """YOLOE plates whose depth points are inside the fitted basket -> live collision boxes in base.
+
+    The low confidence threshold is intentional: a plate seen edge-on through the rack scored 0.10 in the real
+    audience-camera frame.  Basket containment, point count and physical-size checks keep this separate from the
+    external target plate and from weak detections elsewhere on the table.
+    """
+    from scipy.spatial import cKDTree
+    inv = np.linalg.inv(np.asarray(Tbb, float))
+    out = []
+    for i, (mk, c) in enumerate(getattr(det, 'plate_masks', [])):
+        if c < min_conf:
+            continue
+        core = cv2.erode(mk.astype(np.uint8), np.ones((3, 3), np.uint8)).astype(bool)
+        P, _ = cloud(core, depth, K, Tbc)
+        if posj is not None and len(P):
+            d, _ = cKDTree(arm_points(posj)).query(P)
+            P = P[d > 0.04]
+        if len(P) < min_points:
+            continue
+        Lb = (np.c_[P, np.ones(len(P))] @ inv.T)[:, :3]
+        inside = (np.abs(Lb[:, 0]) < 0.255) & (np.abs(Lb[:, 1]) < 0.25) & (Lb[:, 2] > -0.17) & (Lb[:, 2] < 0.16)
+        P = P[inside]
+        if len(P) < min_points:
+            continue
+        med = np.median(P, axis=0)
+        P = P[np.linalg.norm(P - med, axis=1) < 0.24]
+        if len(P) < min_points:
+            continue
+        mu = P.mean(0)
+        _, _, Vt = np.linalg.svd(P - mu, full_matrices=False)
+        R = Vt.T
+        if np.linalg.det(R) < 0:
+            R[:, -1] *= -1
+        L = (P - mu) @ R
+        lo, hi = np.percentile(L, 2, axis=0), np.percentile(L, 98, axis=0)
+        raw = hi - lo
+        # A plate can be partly hidden by wires, but it must still resemble a compact object rather than the rack.
+        if raw.max() < 0.045 or raw.max() > 0.36 or np.partition(raw, -2)[-2] > 0.34:
+            continue
+        size = np.maximum(raw + 2 * pad, [0.025, 0.025, 0.025])
+        centre = mu + R @ ((lo + hi) / 2)
+        out.append((f'basket_plate_{i}', np.round(centre, 4).tolist(), np.round(size, 4).tolist(),
+                    np.round(R, 5).tolist(), round(float(c), 3), int(len(P))))
+    return out
+
+
 def cloud(mask, depth, K, Tbc, stride=1):
     v, u = np.nonzero(mask[::stride, ::stride])
     v, u = v * stride, u * stride
@@ -332,7 +379,8 @@ def estimate(det, rgb, depth, K, Tbc, z_rim, posj=None, M=None):
     why = [w for w, bad in (('handle not seen', n_handle < MIN_HANDLE), ('few points', len(P) < MIN_POINTS),
                             (f'basket occluded (cover {cover:.2f})', MIN_COVER is not None and cover < MIN_COVER)) if bad]
     return dict(T=T, conf=conf, cost=cost, n_top=len(P), n_handle=n_handle, cover=cover, refused=', '.join(why),
-                obstacles=obstacle_boxes(det, rack, depth, K, Tbc, posj))
+                obstacles=obstacle_boxes(det, rack, depth, K, Tbc, posj),
+                basket_obstacles=basket_obstacle_boxes(det, depth, K, Tbc, T, posj))
 
 
 # (보스 10/29 slow start) gap 0.6 -> 0.2 s: the share has a new frame every ~0.06 s
@@ -412,7 +460,8 @@ def combine(res, z_rim, max_spread_mm, max_spread_deg):
     return dict(ok=ok, why='' if ok else f'frames disagree: {spread_mm:.1f} mm, {spread_deg:.1f} deg', T=T.tolist(),
                 spread_mm=spread_mm, spread_deg=spread_deg, frames=len(res), dropped_turned=dropped,
                 conf=float(np.median([r['conf'] for r in res])), n_points=int(np.median([r['n_top'] for r in res])),
-                obstacles=max((r.get('obstacles', []) for r in res), key=len))   # (10/22) plates outside the basket
+                obstacles=max((r.get('obstacles', []) for r in res), key=len),  # (10/22) plates outside the basket
+                basket_obstacles=max((r.get('basket_obstacles', []) for r in res), key=len))
 
 
 def main():

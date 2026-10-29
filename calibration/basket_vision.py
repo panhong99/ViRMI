@@ -420,7 +420,7 @@ def main():
     a.add_argument('--z_rim', type=float)
     a.add_argument('--n', type=int, default=5)
     a.add_argument('--out', required=True)
-    a.add_argument('--camera', help='fixed D455 serial, or "fixed" = config camera/calibration/home joints: open the camera here instead of --share (10/21 look4)')
+    a.add_argument('--camera', help='fixed D455 serial, or "fixed" = config camera/calibration/home joints: open the camera here instead of --share (10/21 look4); "share" = those defaults with the --share frames')
     a.add_argument('--save', help='--camera: save the first frame here (npz)')
     a.add_argument('--cut', nargs='+', default=[], help="(10/23, opt-in) more YOLOE prompts cut out of the rack mask, e.g. bowl")
     a.add_argument('--majority', type=int, default=0, help='(10/29, opt-in) drop the frames that picked the other 180-degree '
@@ -428,10 +428,10 @@ def main():
     a = a.parse_args()
     CUT[:] = a.cut
     MAJORITY[0] = a.majority
-    if a.camera == 'fixed':                         # (look4) the config's camera, calibration, home joints, rim height
-        import calib_core as cc
-        import plate_plans as pp
-        a.camera, a.T_base_cam = str(pp.C['cameras']['fixed_serial']), a.T_base_cam or str(cc.latest_t_base_cam())
+    if a.camera in ('fixed', 'share'):              # (look4) the config's camera, calibration, home joints, rim height;
+        import calib_core as cc                     # (10/29) 'share': the same, the frames from --share (a viewer owns
+        import plate_plans as pp                    # the camera)
+        a.camera, a.T_base_cam = (None if a.camera == 'share' else str(pp.C['cameras']['fixed_serial'])), a.T_base_cam or str(cc.latest_t_base_cam())
         a.posj = a.posj or list(pp.HOME_JOINTS_DEG)
         a.z_rim = a.z_rim if a.z_rim is not None else pp.C['basket']['fixed_z_m']
     Tbc = np.asarray(json.loads(Path(a.T_base_cam).read_text())['T_base_cam'], float)

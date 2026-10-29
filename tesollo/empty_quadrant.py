@@ -26,14 +26,14 @@ def main():
     import calib_core as cc
     import demo_watch as dw
     import plate_plans as pp
-    from real_time_utils import D455Source
+    from fixed_frames import FixedFrames
     Tbc = np.array(cc.load_json(cc.latest_t_base_cam())['T_base_cam'])
     Tb = np.array(json.loads(Path(a.basket).read_text())['T'])
     det = dw.Detector()
-    cam = D455Source(serial=str(pp.C['cameras']['fixed_serial']))
+    cam = FixedFrames(pp.C['cameras']['fixed_serial'])
     votes = []
     try:
-        for _ in range(15):                                      # auto exposure settles
+        for _ in range(15 if cam.cam is not None else 0):     # auto exposure settles (a shared camera has)
             cam.read()
         for _ in range(a.frames):
             fr = cam.read()
@@ -43,7 +43,7 @@ def main():
             plates = dw.bowl_quadrants(dets, fr.depth, K, Tbc, Tb, min_conf=0.15, name='plate')
             votes.append(dw.occupied(counts, plates))
     finally:
-        cam.pipeline.stop()
+        cam.stop()
     occ = {}
     for q in dw.QUADRANTS:
         seen = [v[q] for v in votes if v[q]]

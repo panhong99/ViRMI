@@ -56,7 +56,9 @@ def measure_basket():
     out of the view (calibration/basket_vision.py --camera fixed); the file every basket plan of this run uses."""
     import math
     out_json = Path('/tmp') / f'tesollo_basket_{time.strftime("%Y%m%d_%H%M%S")}.json'
-    r = subprocess.run([str(PLAN_PY), str(REPO / 'calibration/basket_vision.py'), '--camera', 'fixed', '--out', str(out_json),
+    share = Path('/dev/shm/fixed_latest.npz')               # (10/29) a viewer owns the camera: its shared frames
+    cam = 'share' if share.exists() and time.time() - share.stat().st_mtime < 2.0 else 'fixed'
+    r = subprocess.run([str(PLAN_PY), str(REPO / 'calibration/basket_vision.py'), '--camera', cam, '--out', str(out_json),
                         '--cut', 'bowl', '--majority', '4'], capture_output=True, text=True)
     try:
         res = json.loads(out_json.read_text())

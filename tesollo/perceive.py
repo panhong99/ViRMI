@@ -60,16 +60,16 @@ def measure(n=5, conf=0.25, only=None, png=None, max_spread_mm=8.0, radius=0.30)
     sys.path.insert(0, str(ROOT / 'real_time_project'))
     import calib_core as cc
     import plate_plans as pp
-    from real_time_utils import D455Source
+    from fixed_frames import FixedFrames
     from ultralytics import YOLOE
     Tbc = np.array(cc.load_json(cc.latest_t_base_cam())['T_base_cam'])
     model = YOLOE(str(ROOT / 'yoloe-v8l-seg.pt'))
     model.set_classes(list(PROMPTS), model.get_text_pe(list(PROMPTS)))
     A = yaml.safe_load(ARM_POSES.read_text())
-    cam = D455Source(serial=str(pp.C['cameras']['fixed_serial']))
+    cam = FixedFrames(pp.C['cameras']['fixed_serial'])
     found = []
     try:
-        for _ in range(15):                                      # auto exposure settles
+        for _ in range(15 if cam.cam is not None else 0):     # auto exposure settles (a shared camera has)
             cam.read()
         for i in range(n):
             fr = cam.read()
@@ -94,7 +94,7 @@ def measure(n=5, conf=0.25, only=None, png=None, max_spread_mm=8.0, radius=0.30)
                 cv2.imwrite(str(png), img[:, :, ::-1])
             time.sleep(0.3)
     finally:
-        cam.pipeline.stop()
+        cam.stop()
     if any(f is None for f in found):
         return dict(ok=False, why=f'no plate / bowl within {radius * 100:.0f} cm of the grasp spot in '
                                   f'{sum(f is None for f in found)}/{n} frames')

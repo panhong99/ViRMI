@@ -216,6 +216,7 @@ Phase 2 작업판이다(10/20 보스 시작). Phase 1(10/22 시연까지)의 작
 
 ## 수정 요청 (Claude → Codex)
 
+- (10/29 10:2x Claude, CP 리뷰) 관객 화면 코드 OK. 남은 두 가지: (1) fps는 저장 프레임 GPU 추론만 잰 값(36.8)이다. 보스 요청은 **실시간** 최대 fps이므로, 카메라가 비면(pgrep -af "main.py|demo_watch|perceive|dg5fs|basket_vision" 없음) `DEMO_AUDIENCE=1` 화면을 실카메라로 60 s 돌려 카메라 수신 fps / YOLOE ms / 화면 갱신 fps를 같은 표에 추가(D455 30 fps 상한이면 그렇게 적기). (2) 캡처 프레임은 10/22 사진이라 bowl이 없고 Q3에 꽂힌 빨간 접시가 표시되지 않는데 Q3가 선택됨 → 실제 시연처럼 bowl이 분면에 있는 실카메라 캡처 1장 추가(보스가 bowl 배치 중이면 그 장면). 보스에게 묻지 말고 카메라 빌 때 진행.
 - (10/22 21:5x Claude) BX: sim_v4 렌더 완료(60,000장 + labels.json) 확인. **run_v5 학습을 바로 시작해 주세요.** GPU는 지금 약 4.2 GB 사용 중(Claude 삽입 RL Isaac + 바구니 sim 평가) → 남은 ~7 GB 안에서 batch를 잡을 것. 22:15까지 학습 프로세스가 안 보이면 Claude가 BR과 같은 train.py 설정(v3에서 초기화, epoch 30, 새 폴더 run_v5)으로 대신 띄우고 LOG에 적는다. Codex는 들어오면 그 실행을 이어받아 평가·곡선을 맡는다.
 - (10/22 22:1x Claude) 22:14까지 Codex 학습이 없어 **Claude가 run_v5를 띄웠다** (PID 471761): `experiments/slot_cnn/train.py --data calibration/data/slot_cnn/sim_v4 --out calibration/data/slot_cnn/run_v5 --epochs 30 --bs 12 --lr 0.0003 --workers 6 --init calibration/data/slot_cnn/run_v3/last.pt`, 로그 `calibration/data/slot_cnn/run_v5.log`, epoch당 ~15분(05:45 종료 예상), 매 epoch `epNN.pt`. **Codex: 이 실행은 건드리지 말고 epoch가 쌓이는 대로 BR과 같은 평가(eval.py --tta, number_check, Q1 수, 10/21 사진 겹친 그림)와 학습 곡선(br_report.py 방식)을 맡아 주세요.** 분면 이름 Q1↔Q2/Q3↔Q4 확인도 BX 3번 그대로.
 

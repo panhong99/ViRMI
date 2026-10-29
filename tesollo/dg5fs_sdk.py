@@ -72,6 +72,33 @@ def measure_basket():
     BASKET_JSON[0] = str(out_json)
 
 
+VIEW = [None]               # the spectator view this run started (calibration/demo_watch.py --audience --write_share)
+
+
+def start_view():
+    """(보스 10/29: one command) the spectator view after the basket is measured: it owns the fixed camera and shares
+    its frames, the other camera tools of this run read them.  Left running at the end (the next run reuses it)."""
+    share = Path('/dev/shm/fixed_latest.npz')
+    if share.exists() and time.time() - share.stat().st_mtime < 2.0:
+        print('spectator view already running (shared frames fresh)', flush=True)
+        return
+    T = subprocess.run([str(PLAN_PY), '-c', 'import sys; sys.path.insert(0, "calibration"); import calib_core as cc; '
+                        'print(cc.latest_t_base_cam())'], cwd=str(REPO), capture_output=True, text=True).stdout.strip()
+    log = open('/tmp/tesollo_demo_view.log', 'w')
+    VIEW[0] = subprocess.Popen([str(PLAN_PY), '-u', 'calibration/demo_watch.py', '--detect_only', '--camera', 'fixed',
+                                '--audience', '--write_share', '--T_base_cam', T, '--basket', BASKET_JSON[0],
+                                '--imgsz', '512', '--half', '--zoom', '2.0'], cwd=str(REPO), stdout=log, stderr=log,
+                               start_new_session=True)
+    for _ in range(60):
+        time.sleep(0.5)
+        if share.exists() and time.time() - share.stat().st_mtime < 2.0:
+            print(f'spectator view on (pid {VIEW[0].pid}, log /tmp/tesollo_demo_view.log)', flush=True)
+            return
+        if VIEW[0].poll() is not None:
+            break
+    print('   spectator view did not start (see /tmp/tesollo_demo_view.log); this run opens the camera itself', flush=True)
+
+
 def perceive():
     """tesollo/perceive.py (fixed D455 + YOLOE): -> (object, dx, dy) of the object nearest the grasp spot, or exit."""
     out = subprocess.run([str(PLAN_PY), str(REPO / 'tesollo/perceive.py')], capture_output=True, text=True)
@@ -403,6 +430,8 @@ def main():
                         'lift -> teach 1 (over the basket) -> 2 (1 cm over the slot) -> 3 (in the slot); back 3 -> 2 -> 1 -> home')
     p.add_argument('--teach', action='store_true', help='(plate) the arm stops above the basket; teach the insert with the '
                    'pendant, Enter records the joints (tesollo/taught_inserts.json); release, then back the same way + home')
+    p.add_argument('--no_view', action='store_true', help='do not start the spectator view (demo_watch --audience)')
+    p.add_argument('--hold', action='store_true', help='after the grasp wait at "holding>" instead of going to the basket')
     p.add_argument('--new_demo', action='store_true', help='forget the bowls / plates put in the basket earlier today')
     p.add_argument('--leg_enter', action='store_true', help='(old) the mover asks "start" and Enter before every arm leg')
     p.add_argument('--vel', type=float, default=60.0, help='arm speed deg/s (= deg/s^2) for every arm leg (default 60)')
@@ -424,6 +453,8 @@ def main():
         measure_basket()
     if a.new_demo:
         DEMO_STATE.unlink(missing_ok=True)
+    if a.object and BASKET_JSON[0] and not a.no_view:
+        start_view()
     if a.object and BASKET_JSON[0]:
         see_quadrants()                                          # arm home, the basket in view
         st = load_state()
@@ -542,6 +573,8 @@ def main():
             for _ in range(3):
                 time.sleep(1.0)
                 show()
+        if a.object and not a.hold:                       # (보스 10/29) no 'basket' to type: grasp -> basket goes on
+            auto_basket('plate' if a.object == 'plate' else 'bowl')
         # (보스 10/27) keep the grasp while the arm lifts and goes home in the other terminal: only the typed word
         # 'release' opens the hand; Enter shows joints / currents / temperature, Ctrl+C and q do NOT let go here
         print('\n3. HOLDING.  "home" = lift + home;  "basket" = the empty quadrant by itself (bowl: any empty one; plate: '

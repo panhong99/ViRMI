@@ -259,7 +259,8 @@ def bowl_plan(a, k, Tbb, Tbc):
     target = (Tbb @ np.r_[QUAD_XY[model_qd], 0.0, 1.0])[:3] + [BOWL_SHIFT_M[0], BOWL_SHIFT_M[1], BOWL_DROP_M]
     yaw = np.arctan2(target[1], target[0]) - np.arctan2(bottom[1], bottom[0])      # turn with joint 1
     Tp = rz(yaw) @ Tg                                             # the grasp turned about base z: where the bowl bottom goes
-    above_xyz = Tp[:3, 3] + (target - (Tp @ p_b)[:3]) + [0.0, 0.0, a.rise]
+    drop = min(a.rise, BOWL_RISE_M)    # (보스 10/29: lift 30 cm) the descent stays 22 cm (30: 17 mm off the vertical in Q4)
+    above_xyz = Tp[:3, 3] + (target - (Tp @ p_b)[:3]) + [0.0, 0.0, drop]
     # (10/27) the lift pose is near the wrist singularity (J5 ~ -9 deg): a Cartesian line swaps J4/J6 in > 10 deg steps.
     # IK from the lift pose with only joint 1 turned, then a joint-space line (tilt / height checked below)
     T_above = Tp.copy()
@@ -272,7 +273,7 @@ def bowl_plan(a, k, Tbb, Tbc):
     # descend: the place IK seeded from above, a joint-space line (a Cartesian line flipped J4/J6 by > 100 deg near the
     # wrist singularity, 10/27), checked below to stay within 1.5 cm of the vertical and level (Q2-Q4: 10-11 mm)
     T_place = k.fk(np.radians(above))
-    T_place[2, 3] -= a.rise
+    T_place[2, 3] -= drop
     q_place = k.ik(T_place, np.radians(above))
     assert q_place is not None and np.abs(k.fk(q_place)[:3, 3] - T_place[:3, 3]).max() < 1e-3, 'IK failed at the basket'
     down = [above + s * (np.degrees(q_place) - above) for s in np.linspace(0, 1, 13)]

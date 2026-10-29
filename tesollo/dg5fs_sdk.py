@@ -48,7 +48,7 @@ JOINTS = 20
 # plate: pose 0 -> arm to the plate -> pose 9 (grasp-ready) -> 5 finger parallel (as grasp recipe 2: spread joints held) 7 N;
 # bowl: pose 30 + grasp recipe 1 (5 finger to the centre), 7 N
 OBJECT_GRASP = {'plate': ('plate_pre9', '5F_5FINGER_PARALLEL', [1, 5, 9, 13, 17], 7.0),
-                'bowl': ('bowl_grasp30', '5F_5FINGER', [], 7.0)}
+                'bowl': ('bowl_grasp30', '5F_5FINGER', [], 4.0)}   # (보스 10/29: bowl gently) 7 -> 4 N
 
 
 def measure_basket():
@@ -121,6 +121,9 @@ WRIST_LESS = [45.0]         # (보스 10/29 real Q3 photo) plate: the hand turns
 BASKET_JSON = ['']          # (10/29) the basket measured at the start (calibration/basket_vision.py), for every basket plan
 MOVER_GO = ['--opening_done', '--auto']   # (보스 10/29) this script's own Enter / command starts a step; its legs then run
                             # on without the mover's 'start' + Enter per leg (--leg_enter: the old prompts)
+TAUGHT_LESS = [25.0]        # (보스 10/29) the taught insert's wrist turned back this much (--taught_wrist_less)
+LIFT_M = [0.30]             # (보스 10/29) straight up after the grasp, bowl or plate (--lift)
+PRE_PLAN = {}               # the first basket target's plan, started while the hand closes (보스 10/29: too slow after the grasp)
 BASKET = {}                 # the last basket plan of this run (basket_plan.py): its path, for 'descend'
 # (보스 10/29) 'basket' alone = the empty quadrant by itself: a bowl into any empty quadrant, plates into an empty Q3 / Q4,
 # the 1st plate front (small pin numbers, far from the robot), the 2nd back in the same quadrant.  What went in is kept in
@@ -237,24 +240,45 @@ def mover(plan, leg, v, extra=()):
     return r.returncode == 0
 
 
+def plan_cmd(obj, quadrant, pin, centre_h=None):
+    """The basket plan command: plate = the pendant-taught insert (taught_plan.py) or the planner; bowl = the planner."""
+    if TAUGHT_IX[0] is not None and obj == 'plate':      # (보스 10/29) the pendant-taught insert, one sparse spline after
+        return ([str(PLAN_PY), str(REPO / 'tesollo/taught_plan.py'), '--index', str(TAUGHT_IX[0]),    # the grasp
+                 '--quadrant', quadrant, '--pin', str(pin), '--dx', str(SHIFT[0]), '--dy', str(SHIFT[1]),
+                 '--rise', str(LIFT_M[0]), '--wrist_less', str(TAUGHT_LESS[0])]
+                + (['--basket', BASKET_JSON[0]] if BASKET_JSON[0] else []))
+    return ([str(PLAN_PY), str(REPO / 'tesollo/basket_plan.py'), '--object', obj, '--quadrant', quadrant,
+             '--pin', str(pin), '--dx', str(SHIFT[0]), '--dy', str(SHIFT[1])]
+            + (['--rise', str(LIFT_M[0])] if obj != 'plate' else [])
+            + (['--centre_h', str(centre_h)] if centre_h is not None else [])
+            + (['--sim_corr', SIM_CORR[0]] if SIM_CORR[0] and obj == 'plate' else [])
+            + (['--wrist_less', str(WRIST_LESS[0])] if WRIST_LESS[0] and obj == 'plate' and not GRIPPER[0] else [])
+            + (['--gripper_path', '--plates'] + [f'{p_["q"]}:{p_["pin"]}' for p_ in load_state()['plates']]
+               + (['--wrist'] + [str(v) for v in GRIPPER[1]] if GRIPPER[1] else []) if GRIPPER[0] and obj == 'plate' else [])
+            + (['--basket', BASKET_JSON[0]] if BASKET_JSON[0] else []))
+
+
+def pre_plan(obj):
+    """Start the first auto target's plan now (it runs while the hand closes); basket() takes its output."""
+    targets = auto_targets(obj)
+    if targets:
+        q, pin, _ = targets[0]
+        PRE_PLAN.update(key=(obj, q, pin, None),
+                        proc=subprocess.Popen(plan_cmd(obj, q, pin), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True))
+
+
 def basket(obj, quadrant, pin, centre_h=None):
     """While the object is held: basket_plan.py (plate: plate_plans' basket planner with the Tesollo grasp, into the pins;
     bowl: upright into the middle of a quadrant), then lift, to_above and descend (Enter per leg); BASKET['down'] once
     the descend has run, so 'release' knows the object is in the basket.  -> None: no plan, False: a leg stopped, True."""
-    if TAUGHT_IX[0] is not None and obj == 'plate':      # (보스 10/29) the pendant-taught insert, one sparse spline after
-        out = subprocess.run([str(PLAN_PY), str(REPO / 'tesollo/taught_plan.py'), '--index', str(TAUGHT_IX[0]),   # the grasp
-                              '--quadrant', quadrant, '--pin', str(pin), '--dx', str(SHIFT[0]), '--dy', str(SHIFT[1])]
-                             + (['--basket', BASKET_JSON[0]] if BASKET_JSON[0] else []), capture_output=True, text=True)
+    key = (obj, quadrant, pin, centre_h)
+    if PRE_PLAN.get('key') == key:                       # started while the hand closed
+        proc = PRE_PLAN.pop('proc')
+        o, e_ = proc.communicate()
+        out = subprocess.CompletedProcess(proc.args, proc.returncode, o, e_)
+        PRE_PLAN.clear()
     else:
-        out = None
-    out = out or subprocess.run([str(PLAN_PY), str(REPO / 'tesollo/basket_plan.py'), '--object', obj, '--quadrant', quadrant,
-                          '--pin', str(pin), '--dx', str(SHIFT[0]), '--dy', str(SHIFT[1])]
-                         + (['--centre_h', str(centre_h)] if centre_h is not None else [])
-                         + (['--sim_corr', SIM_CORR[0]] if SIM_CORR[0] and obj == 'plate' else [])
-                         + (['--wrist_less', str(WRIST_LESS[0])] if WRIST_LESS[0] and obj == 'plate' and not GRIPPER[0] else [])
-                         + (['--gripper_path', '--plates'] + [f'{p_["q"]}:{p_["pin"]}' for p_ in load_state()['plates']]
-                            + (['--wrist'] + [str(v) for v in GRIPPER[1]] if GRIPPER[1] else []) if GRIPPER[0] and obj == 'plate' else [])
-                         + (['--basket', BASKET_JSON[0]] if BASKET_JSON[0] else []), capture_output=True, text=True)
+        out = subprocess.run(plan_cmd(*key), capture_output=True, text=True)
     print('\n'.join(l for l in out.stdout.splitlines() if l.startswith(('basket', 'OK', '  ', 'merged', 'wrist', 'carry'))), flush=True)
     m = re.search(r'^plan: (\S+)', out.stdout, re.M)
     if out.returncode or not m:
@@ -462,10 +486,16 @@ def main():
                    'they stopped on the last grasp (tesollo/grasp_contact.json) in one slow move, the force grasp does the rest '
                    '(보스 10/29: ready -> grasp as one motion); 0 = pre-pose, then grasp')
     p.add_argument('--smooth_grasp', action='store_true', help='(--object, untested) the SDK smooth-grasping flag on')
+    p.add_argument('--lift', type=float, default=0.30, help='straight up after the grasp, bowl or plate [m] (보스 10/29: 30 cm)')
+    p.add_argument('--taught_wrist_less', type=float, default=25.0, help='(taught plate insert) the wrist this much less '
+                   'leaned back than taught, plate bottom kept on the slot [deg] (보스 10/29: 25; 0 = as taught)')
+    p.add_argument('--open_first', action='store_true', help='(old) open the hand in the basket before the arm goes home '
+                   '(default: release, arm home, then open - 보스 10/29)')
     p.add_argument('--approach_stop', action='store_true', help='(old) the arm stops above the object before going down')
     p.add_argument('--motion_ms', type=int, default=3000, help='time per pose move [ms] (slow)')
     a = p.parse_args()
     VEL[0] = a.vel
+    LIFT_M[0], TAUGHT_LESS[0] = a.lift, a.taught_wrist_less
     ARM_APPROACH[:] = ['above', 'down'] if a.approach_stop else ARM_APPROACH
     TEACH[0] = a.teach
     INSERT_VEL[0] = a.insert_vel
@@ -611,9 +641,11 @@ def main():
             check('grasp data', g.set_grasp_data(mode, a.force, 0, smooth))
             check(f'motion time {a.grasp_ms} ms', g.set_motion_time_all_equal(a.grasp_ms))
             check('close', g.move_joint_all(close))
+            if not a.hold:                                     # (보스 10/29: slow after the grasp) plan while the hand closes
+                pre_plan('plate' if a.object == 'plate' else 'bowl')
             time.sleep(max(0.0, a.grasp_ms / 1000 - 0.3))        # no stop between the two
             check('grasp', g.grasp(1))
-            time.sleep(2.0)
+            time.sleep(1.2)
         else:
             ask(f'1. move to "{a.pre}" in {a.motion_ms} ms.')
             check('move', g.move_joint_all(pre))
@@ -695,16 +727,23 @@ def main():
                     print(f'  (last grasp not saved: {e})', flush=True)
             check('release', g.grasp(0))
             time.sleep(1.0)
-            try:
-                if AUTO[0] or input('\n4. open the hand (all 0)?  Enter = go, n = leave it: ').strip().lower() != 'n':
-                    g.move_joint_all([0.0] * JOINTS)
-                    time.sleep(a.motion_ms / 1000 + 0.5)
-                    show()
-            except EOFError:
-                pass
+
+            def open_hand():
+                try:
+                    if AUTO[0] or input('\n4. open the hand (all 0)?  Enter = go, n = leave it: ').strip().lower() != 'n':
+                        g.move_joint_all([0.0] * JOINTS)
+                        time.sleep(a.motion_ms / 1000 + 0.5)
+                        show()
+                except EOFError:
+                    pass
+            if a.open_first or not (BASKET and BASKET.get('down') and AUTO[0]):
+                open_hand()
+                opened = True
+            else:
+                opened = False                                   # (보스 10/29) the hand stays as it is on the way home
             try:                                                 # after a basket drop: back up and home with that plan
                 if BASKET and BASKET.get('down') and AUTO[0]:
-                    print('\n5. arm: out of the basket + home', flush=True)
+                    print('\n5. arm: out of the basket + home' + ('' if opened else ' (hand opens at home)'), flush=True)
                 if BASKET and ((BASKET.get('down') and AUTO[0]) or
                                input('\n5. arm: ascend + home with the basket plan?  Enter = go, n = no: ').strip().lower() != 'n'):
                     out_leg = BASKET.get('out_leg', 'ascend')
@@ -713,6 +752,9 @@ def main():
                         mover(BASKET['plan'], 'to_home', VEL[0])
             except EOFError:
                 pass
+            if not opened:
+                print('\n6. at home: open the hand', flush=True)
+                open_hand()
             g.system_stop()
         g.disconnect_to_gripper()
 

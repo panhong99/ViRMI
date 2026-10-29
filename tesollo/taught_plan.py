@@ -45,7 +45,9 @@ def main():
     p.add_argument('--pin', type=int, help='another pin of the taught quadrant (default the taught pin)')
     p.add_argument('--dx', type=float, default=0.0)
     p.add_argument('--dy', type=float, default=0.0)
-    p.add_argument('--rise', type=float, default=0.20, help='straight lift after the grasp before the carry [m] (보스 20 cm)')
+    p.add_argument('--rise', type=float, default=0.30, help='straight lift after the grasp before the carry [m] (보스 10/29: 30 cm)')
+    p.add_argument('--wrist_less', type=float, default=25.0, help='turn the hand this much less (grasp -> insert) than taught, '
+                   'about the held plate\'s lowest point [deg] (보스 10/29: 25 less is enough for the slot; 0 = as taught)')
     a = p.parse_args()
     e = json.loads(TAUGHT.read_text())[a.index]
     pts = e['waypoints_deg']
@@ -85,6 +87,45 @@ def main():
         note = f'taught poses moved {dmm:.0f} mm / {ddeg:.1f} deg (basket now' + (f', pin {e["pin"]} -> {pin})' if pin != e['pin'] else ')')
     else:
         note = f'joints as taught (basket within {dmm:.1f} mm / {ddeg:.2f} deg)'
+    if a.wrist_less:
+        # (보스 10/29) the taught insert leans the hand back more than the slot needs: each taught pose turned back by
+        # --wrist_less about the wrist pitch axis (J5 at the slot, toward the grasp), pivot = the model plate's lowest point
+        # at that pose (the plate bottom stays where it was taught).  Solved with J4 / J6 kept as taught (J1-J3, J5 free):
+        # a full IK lands near J5 = 0 and flipped J4 / J6 by 40-80 deg
+        from scipy.optimize import least_squares
+        from scipy.spatial.transform import Rotation
+        cloud = pp.plate_cloud(np.asarray(e['plate_in_tcp'], float), np.eye(4))
+        q3 = np.radians(pts[-1])
+        d = q3.copy()
+        d[4] -= np.radians(1.0)
+        axis = Rotation.from_matrix(k.fk(d)[:3, :3] @ k.fk(q3)[:3, :3].T).as_rotvec()
+        Rb = Rotation.from_rotvec(axis / np.linalg.norm(axis) * np.radians(a.wrist_less)).as_matrix()
+        turned = []
+        for q in pts:
+            q0 = np.radians(q)
+            F = k.fk(q0)
+            low = cloud @ F[:3, :3].T + F[:3, 3]
+            piv = low[np.argmin(low[:, 2])]
+            p_f = F[:3, :3].T @ (piv - F[:3, 3])                 # the pivot in the flange frame
+            Rt = Rb @ F[:3, :3]
+
+            def res(x, q0=q0, p_f=p_f, piv=piv, Rt=Rt):
+                qq = q0.copy()
+                qq[[0, 1, 2, 4]] = x
+                G = k.fk(qq)
+                return np.r_[(G[:3, :3] @ p_f + G[:3, 3] - piv) * 100, Rotation.from_matrix(Rt.T @ G[:3, :3]).as_rotvec()]
+            x = least_squares(res, q0[[0, 1, 2, 4]]).x
+            r = res(x)
+            if np.linalg.norm(r[:3]) > 0.1 or np.degrees(np.linalg.norm(r[3:])) > 6:
+                sys.exit(f'REFUSED: the wrist turned back {a.wrist_less} deg at {q}: plate bottom off {np.linalg.norm(r[:3]) * 10:.1f} mm, '
+                         f'orientation off {np.degrees(np.linalg.norm(r[3:])):.1f} deg')
+            qq = q0.copy()
+            qq[[0, 1, 2, 4]] = x
+            turned.append(np.degrees(qq).tolist())
+        print(f'wrist: {a.wrist_less:.0f} deg less than taught (J5 at the slot {pts[-1][4]:+.1f} -> {turned[-1][4]:+.1f}, '
+              'J4 / J6 as taught, plate bottom on the taught spot)')
+        note += f', wrist {-a.wrist_less:+.0f} deg'
+        pts = turned
     T = k.fk(np.radians(grasp))                                  # the lift: straight up --rise; a knot at 5 cm keeps the
     T5 = T.copy()                                                # spline's first part vertical off the stand (10/29: with
     T5[2, 3] += 0.05                                             # only the top knot it swung 14 mm sideways at 2 cm, 26 mm

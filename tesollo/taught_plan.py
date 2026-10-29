@@ -92,7 +92,9 @@ def main():
     low = np.degrees(k.ik(T5, np.radians(grasp)))
     up = np.degrees(k.ik(T, np.radians(low)))
     post = [grasp.tolist(), low.tolist(), up.tolist()] + [list(map(float, q)) for q in pts[:-1]]
-    ins = [list(map(float, q)) for q in pts[-2:]]
+    a2, a3 = np.array(pts[-2], float), np.array(pts[-1], float)
+    ins = [a2.tolist(), ((a2 + a3) / 2).tolist(), a3.tolist()]   # the mover needs >= 2 targets after the start (10/29 real:
+                                                                 # 2 knots were refused and the plate stopped 1 cm over the slot)
     back = [list(map(float, q)) for q in [pts[-1]] + pts[-2::-1] + [home]]
     for name, w in (('post_grasp', post), ('insert', ins), ('return_home', back)):
         if len(w) > MAX_KNOTS:
@@ -114,7 +116,7 @@ def main():
     (out / 'plan.json').write_text(json.dumps(plan, indent=1))
     print(f'basket: {note}')
     print(f'OK: taught {e["quadrant"]} pin {pin}: post_grasp {len(post)} knots (grasp, up 5 / {a.rise * 100:.0f} cm, teach 1, '
-          f'teach 2), insert 2 knots, return_home {len(back)} knots; carry flange over the basket >= '
+          f'teach 2), insert 3 knots, return_home {len(back)} knots; carry flange over the basket >= '
           f'{min(inside) * 100 if inside else float("nan"):.0f} cm over the rim (TCP not checked)')
     for n in ('post_grasp', 'insert', 'return_home'):
         print(f'  {n}: {len(plan["legs"][n]["waypoints_deg"])} waypoints, end {plan["legs"][n]["waypoints_deg"][-1]}')

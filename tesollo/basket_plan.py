@@ -301,8 +301,8 @@ def bowl_plan(a, k, Tbb, Tbc):
         # Cartesian knot every 10 cm, the carry / descent joint lines cut into even steps (the controller spline gives
         # every knot the same time: even steps = even speed; the descent's shorter steps slow it into the basket)
         lift_s = lift_line(k, grasp, a.rise, n=int(round(a.rise / 0.10)) + 1)
-        n_c = int(np.ceil(np.abs(above - lift_s[-1]).max() / 14.0))
-        n_d = 3
+        n_d = 3                                            # (보스 10/29: bowl lift 50 cm) the carry steps grow to stay <= 20 knots
+        n_c = min(int(np.ceil(np.abs(above - lift_s[-1]).max() / 14.0)), 20 - len(lift_s) - n_d)
         carry_s = [lift_s[-1] + s_ * (above - lift_s[-1]) for s_ in np.linspace(0, 1, n_c + 1)[1:]]
         down_s = [above + s_ * (np.array(down[-1]) - above) for s_ in np.linspace(0, 1, n_d + 1)[1:]]
         legs['carry_down'] = list(lift_s) + carry_s + down_s

@@ -137,6 +137,7 @@ TAUGHT_LESS = [25.0]        # (보스 10/29) the taught insert's wrist turned ba
 SMOOTH = [True]             # (보스 10/29: stepwise look) one even-knot spline grasp -> in the basket, softer acc, movesj total
                             # time from the knots (보스 10/29: too slow, vel alone did not set the speed) (--stepwise = old)
 ACC = [0.5]                 # acc [deg/s^2] = this x vel on every arm leg (--acc_ratio; --stepwise: 1)
+BOWL_LIFT = [0.50]          # (보스 10/29: the bowl ~20 cm higher than the plate) --bowl_lift
 LIFT_M = [0.30]             # (보스 10/29) straight up after the grasp, bowl or plate (--lift)
 PRE_PLAN = {}               # the first basket target's plan, started while the hand closes (보스 10/29: too slow after the grasp)
 BASKET = {}                 # the last basket plan of this run (basket_plan.py): its path, for 'descend'
@@ -271,7 +272,7 @@ def plan_cmd(obj, quadrant, pin, centre_h=None):
                 + (['--basket', BASKET_JSON[0]] if BASKET_JSON[0] else []))
     return ([str(PLAN_PY), str(REPO / 'tesollo/basket_plan.py'), '--object', obj, '--quadrant', quadrant,
              '--pin', str(pin), '--dx', str(SHIFT[0]), '--dy', str(SHIFT[1])]
-            + (['--rise', str(LIFT_M[0])] + (['--smooth'] if SMOOTH[0] else []) if obj != 'plate' else [])
+            + (['--rise', str(BOWL_LIFT[0])] + (['--smooth'] if SMOOTH[0] else []) if obj != 'plate' else [])
             + (['--centre_h', str(centre_h)] if centre_h is not None else [])
             + (['--sim_corr', SIM_CORR[0]] if SIM_CORR[0] and obj == 'plate' else [])
             + (['--wrist_less', str(WRIST_LESS[0])] if WRIST_LESS[0] and obj == 'plate' and not GRIPPER[0] else [])
@@ -512,7 +513,9 @@ def main():
                    '(보스 10/29: ready -> grasp as one motion; bowl slowly: its pre-pose is only ~9 deg from the contact, so '
                    'the force grasp did all of it fast); default plate 0.7, bowl 0.95; 0 = pre-pose, then grasp')
     p.add_argument('--smooth_grasp', action='store_true', help='(--object, untested) the SDK smooth-grasping flag on')
-    p.add_argument('--lift', type=float, default=0.30, help='straight up after the grasp, bowl or plate [m] (보스 10/29: 30 cm)')
+    p.add_argument('--lift', type=float, default=0.30, help='(plate) straight up after the grasp [m] (보스 10/29: 30 cm)')
+    p.add_argument('--bowl_lift', type=float, default=0.50, help='(bowl) straight up after the grasp [m] (보스 10/29: 20 cm '
+                   'more than 30)')
     p.add_argument('--taught_wrist_less', type=float, default=25.0, help='(taught plate insert) the wrist this much less '
                    'leaned back than taught, plate bottom kept on the slot [deg] (보스 10/29: 25; 0 = as taught)')
     p.add_argument('--open_first', action='store_true', help='(old) open the hand in the basket before the arm goes home '
@@ -525,7 +528,7 @@ def main():
     p.add_argument('--motion_ms', type=int, default=3000, help='time per pose move [ms] (slow)')
     a = p.parse_args()
     VEL[0] = a.vel
-    LIFT_M[0], TAUGHT_LESS[0] = a.lift, a.taught_wrist_less
+    LIFT_M[0], TAUGHT_LESS[0], BOWL_LIFT[0] = a.lift, a.taught_wrist_less, a.bowl_lift
     SMOOTH[0], ACC[0] = not a.stepwise, 1.0 if a.stepwise else a.acc_ratio
     ARM_APPROACH[:] = ['above', 'down'] if a.approach_stop else ARM_APPROACH
     TEACH[0] = a.teach

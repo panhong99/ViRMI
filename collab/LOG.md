@@ -5639,3 +5639,15 @@ plate 삽입 +y 5 cm, 손목 회전 30–45° 이내, 오늘 밤 sim에서 핸�
 - 원인: 계획 스크립트를 실행하는 FoundationPose Python 3.11에는 numpy/scipy가 있지만 `cffi`가 없고, DGSDK가 설치된 base Python 3.14에는 `cffi 2.1.1`이 있으나 numpy/scipy가 없다. 한 프로세스에 계획과 DGSDK를 같이 넣어 실행 시 `ModuleNotFoundError: cffi`가 났다.
 - 수정: `support_grasp180.py`는 FoundationPose 환경에서 계획만 만든 뒤, DGSDK 제어를 새 `tesollo/support_grasp180_hand.py`에 넘겨 `/home/pan/miniconda3/bin/python3`으로 자동 실행한다. 사용 명령은 그대로 `~/miniconda3/envs/foundationpose/bin/python tesollo/support_grasp180.py --execute`다. 패키지를 추가 설치하지 않았다.
 - 검증: 두 Python의 `py_compile`, base Python의 `cffi 2.1.1 + dgsdk` import, worker `--help`, launcher argument smoke, parent plan-only를 통과했다. plan-only 재생성 결과는 19 controller points, TCP 위치 변화 0.000 mm, 자세 변화 180°, 최저 hand z +0.037 m. 실로봇·손은 실행하지 않았다.
+
+## 2026-10-29 밤 (Claude) — 보스 퇴근 후 학습
+
+받은 일 (보스 20:4x): 측면 카메라(338122303684, 손목에서 옆벽으로 이동)로 빗살 tip 관측 95 % 이상, 접시 하강을 목표 슬롯 띠에 맞추는 도킹 RL(보상: 밑면이 띠 침범), Codex와 서로 검증.
+
+1. 손목 각도 sim 학습 (`f419a58`): 티칭 경로, Q3 핀 3/6/9/12, 손 안 ±5 mm/±5°/±2°, 핀별 CEM(16×16×25) 후 독립 seed 핀당 64회. strict 성공 w0 37 %, w10 31 %, w20 38 %, w25 31 %, w30 29 %, w40 23 %. 고정 경로 한계 ≈ 1/3 → 관측 보정(도킹) 필요. 계획기 plate_in_tcp는 실제와 ~90° 틀림(접시 면이 빗살 줄과 나란) → `--calibrate_h`로 티칭 슬롯 자세에서 보정. 로그 `rl/logs/hand_basket/{cem,eval}_taught_1029_cal*`.
+2. 측면 카메라 자세 (`12a76a7`): CNN Q3 tip 24/25 → 모델 tip PnP 0.7 px. 빗살 반복으로 칸이 밀린 해가 같이 맞아(첫 결과는 Q2로 2칸 침범) 바구니 전체 깊이 일치도로 선택. `calibration/data/side_cam/T_base_side.json`: 카메라 (836, −452, 629) mm, 광축 (0.02, 0.56, −0.83).
+3. 측면 CNN (`1fd7644`): `sim_side_v1` 8000장(분면 하나 crop·확대, 접시 걸친 장면 50 %) → `run_side_v1` (v10 ep02 + 8 epoch, 11분).
+   - sim 독립 600장: recall 0.988, precision 0.973 (학습 전 0.218 / 0.117) — 목표 95 % 통과.
+   - 실사진 2장(같은 장면): Q3 recall 52/52, precision 52/52 (`row_filter`: 등간격 깨는 클립·프레임 tip 제거). Q4는 눈으로 프레임당 26/26·오검출 0이지만, 모델 Q4 빗살이 줄마다 0.3–0.8 피치 어긋나 투영 정답으로는 채점 불가. 그림 `outputs/side_cam_q3_20261029/eval_reg_filter/`.
+   - 한계: 실사진이 정지 장면 2장뿐. 접시를 든 장면·조명 변화는 내일 보스와 촬영 필요.
+4. 도킹 RL: TASKBOARD CT로 Codex에 22:21 이후 배정(환경·기준선·PPO·Isaac 안착). 서로 검토 절차는 TASKBOARD '수정 요청'.

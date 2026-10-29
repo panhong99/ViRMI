@@ -5621,3 +5621,9 @@ plate 삽입 +y 5 cm, 손목 회전 30–45° 이내, 오늘 밤 sim에서 핸�
   - Q3:6/Q4:6 세부: lift z 증가 **7.001/6.999 cm**, carry z 범위 **0.011 mm**, 하강 xy 이탈 **0.004/0.006 mm**.
   - 실행 spline: lift_carry **10점**(최대 knot Q3 31.082°, Q4 23.164°), descend **2점**(5.059°/3.285°), return_home **6점**(30.961°/30.442°). `ros2_nodes.validate` 문제 0건.
 - 검증: `py_compile`, `git diff --check`, Q3/Q4 후보 10건 계획, default와 `--gripper_path` 모두 plan-only 통과. 표 `/tmp/tesollo_sparse_matrix.tsv`, 수치 `/tmp/tesollo_sparse_demo_validation.json`. 로봇·손·카메라·ROS 명령은 실행하지 않았다.
+
+### 2026-10-29 18:0x Codex — 이미 넣은 접시의 live 장애물 재인식
+- `calibration/basket_vision.py`: YOLOE plate mask의 depth 점을 base로 역투영한 뒤 fitted basket 내부만 남겨 PCA OBB를 만든다. edge-on 실접시의 기존 confidence 0.103을 받기 위해 문턱은 0.05이며, 바구니 내부 범위·점 120개·물리 크기 조건을 함께 적용한다. 결과는 `basket_vision.json`의 `basket_obstacles`로 전달한다.
+- `tesollo/taught_plan.py`: remembered slot 형상 대신 위 live OBB만 사용한다. 현재 `carry_insert`(또는 stepwise `post_grasp`) controller spline을 knot당 30 sample로 평가하고, held-plate cloud와 OBB 최소 여유가 **15 mm 미만이면 계획을 거부**한다. 전체 환경 충돌 sweep/RRT는 계속 사용하지 않으며 waypoint 수도 늘리지 않는다.
+- 오프라인 검증: 합성 RGB-D plate가 basket 안/밖일 때 OBB **1/0개**. 먼 OBB 계획 통과(최소 **7533.9 mm**), 첫 held-plate 점과 겹친 OBB 계획 거부(**−40.0 mm**). `py_compile`, `git diff --check`, calibration basket unit tests **11/11** 통과.
+- 한계: 실행 중인 관객 화면·카메라와 실로봇은 건드리지 않았다. 두 번째 물체 실행 때 새 바구니 측정 JSON을 사용해야 live 장애물이 들어온다. 실제 접시의 edge-on mask/깊이 누락 시에는 OBB가 없으므로 실기 전 관객 화면과 JSON을 함께 확인한다.

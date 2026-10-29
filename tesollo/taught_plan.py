@@ -157,7 +157,12 @@ def main():
             T[2, 3] += dz
             q = k.ik(T, q)
             lift.append(np.degrees(q).tolist())
-        carry = lift + knots([lift[-1]] + [list(map(float, q_)) for q_ in pts[:-1]], a.knot_deg)[1:]
+        step = a.knot_deg                                        # (10/29 sweep: pin 12 + plate 5 cm left -> 21 knots)
+        while True:                                              # wider steps until the leg fits MAX_KNOTS
+            carry = lift + knots([lift[-1]] + [list(map(float, q_)) for q_ in pts[:-1]], step)[1:]
+            if len(carry) + 2 <= MAX_KNOTS:
+                break
+            step *= 1.15
         n_in = 2                                                 # the last ~1 cm: 2 short steps (~half the carry speed)
         carry += [(a2 + (a3 - a2) * i / n_in).tolist() for i in range(1, n_in + 1)]
         back_s = knots(back, a.knot_deg * 1.6)

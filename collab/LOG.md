@@ -5634,3 +5634,8 @@ plate 삽입 +y 5 cm, 손목 회전 30–45° 이내, 오늘 밤 sim에서 핸�
 - 손: `plate_pre9`에서 시작해 손가락 2–5는 마지막 plate contact 쪽으로 기본 70% 이동한 자세를 position mode로 유지한다. thumb만 force mode가 되도록 손가락 2–5의 16개 관절을 고정하고, `5F_2FINGER_1_AND_2` 모드에서 index를 고정해 thumb만 기본 **1.0 N**으로 닫는다. arm 기본 **10°/s**, hand **4000 ms**다.
 - 실행은 각 단계(받침 자세, arm 접근, thumb 닫기)에 Enter 확인이 있고 파지 뒤에는 팔을 움직이지 않는다. `release` 전에는 lift/carry/home 명령을 받지 않는다. 명령: `~/miniconda3/envs/foundationpose/bin/python tesollo/support_grasp180.py --execute`.
 - 한계: 실제 네 손가락 패드가 접시 밑면을 받치는지는 실물 배치와 접촉으로 확인해야 한다. 이번에는 실로봇·손을 실행하지 않았고, 접시 위치는 기존 taught 위치이므로 이동했으면 `--dx/--dy`가 필요하다.
+
+### 2026-10-29 19:0x Codex — support grasp `cffi` 실행환경 수정 (`7f9ca89`)
+- 원인: 계획 스크립트를 실행하는 FoundationPose Python 3.11에는 numpy/scipy가 있지만 `cffi`가 없고, DGSDK가 설치된 base Python 3.14에는 `cffi 2.1.1`이 있으나 numpy/scipy가 없다. 한 프로세스에 계획과 DGSDK를 같이 넣어 실행 시 `ModuleNotFoundError: cffi`가 났다.
+- 수정: `support_grasp180.py`는 FoundationPose 환경에서 계획만 만든 뒤, DGSDK 제어를 새 `tesollo/support_grasp180_hand.py`에 넘겨 `/home/pan/miniconda3/bin/python3`으로 자동 실행한다. 사용 명령은 그대로 `~/miniconda3/envs/foundationpose/bin/python tesollo/support_grasp180.py --execute`다. 패키지를 추가 설치하지 않았다.
+- 검증: 두 Python의 `py_compile`, base Python의 `cffi 2.1.1 + dgsdk` import, worker `--help`, launcher argument smoke, parent plan-only를 통과했다. plan-only 재생성 결과는 19 controller points, TCP 위치 변화 0.000 mm, 자세 변화 180°, 최저 hand z +0.037 m. 실로봇·손은 실행하지 않았다.

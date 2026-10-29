@@ -270,6 +270,7 @@ def main():
         ok, landed = np.zeros(N, bool), np.full(N, -1)
         loose = np.zeros(N, bool)
         still = np.linalg.norm(plate.data.root_pos_w.cpu().numpy() - p_still, axis=1) < 0.01
+        nerr_all = np.zeros(N)
         diag = np.zeros((N, 4))                                   # x error to the target gap [m], y error [m], upright, low [m]
         for e in range(N):
             j = job_of[e]
@@ -289,10 +290,12 @@ def main():
             lean = math.radians(TINE_LEAN[model_qd[j]])
             nerr = min(math.degrees(math.acos(min(1.0, abs(n_b @ np.array([math.cos(sg * lean), 0.0, math.sin(sg * lean)])))))
                        for sg in (1, -1))
+            nerr_all[e] = nerr
             ok[e] = (kb == gap_t[j] and abs(bot[0] - gx[kb]) < SUCC['bottom_tol_m'] and abs(c[1] - gaps_b[j][0][1]) < SUCC['centre_tol_m']
                      and bot[2] - FLOOR_B < SUCC['max_height_m'] and nerr < SUCC['max_normal_err_deg'] and still[e])
             landed[e] = kb
         rollout.diag = diag
+        rollout.nerr = nerr_all
         rollout.loose = loose
         rollout.hand_hit = hand_hit.cpu().numpy()
         rollout.hand_max_force = hand_max_force.cpu().numpy()
@@ -341,6 +344,10 @@ def main():
                    hand_max_penetration_mm=float(rollout.hand_max_pen.max() * 1000) if a.hand else None,
                    hand_pose=('plate_pre9 + 7 deg on each finger flexion joint_2' if a.hand else None),
                    samples=samples, args=vars(a))
+        if dock is not None:                                   # (Claude 10/29) per env, to match kinematic vs physics
+            out['dock_samples'] = [dict(env=int(e), job=int(job_of[e]), target_gap=int(gap_t[job_of[e]]), landed=int(landed[e]),
+                                        strict=bool(ok[e]), plane_err_deg=round(float(rollout.nerr[e]), 2),
+                                        low_mm=round(float(d[e, 3]) * 1000, 1)) for e in range(N)]
     else:
         mu = np.zeros((nj, 3))
         sd = np.tile([0.02, 0.01, 0.01], (nj, 1))

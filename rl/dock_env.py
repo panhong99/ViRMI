@@ -49,7 +49,8 @@ class DockEnv:
                  job=DEFAULT_JOB, camera=DEFAULT_CAMERA, hang_deg=15.0,
                  grip_mm=15.0, tilt_deg=3.0, basket_xy_mm=10.0,
                  basket_yaw_deg=1.0, pitch_frac=0.05, lean_deg=3.0, descend_extra_mm=0.0,
-                 residual_xy_mm=80.0, residual_pitch_deg=15.0, hover_until=None, hover_max=120, hover_step_mm=2.0):
+                 residual_xy_mm=80.0, residual_pitch_deg=15.0, hover_until=None, hover_max=120, hover_step_mm=2.0,
+                 hover_tilt_deg=None):
         self.device = torch.device(device)
         self.n, self.path_steps, self.hover_steps = int(num_envs), int(steps), int(hover_steps)
         # (Claude 10/29 3rd review, opt-in) after the taught end keep going down 2 mm a step until floor contact,
@@ -58,6 +59,7 @@ class DockEnv:
         # (opt-in, 보스 10/29 'docking') hover_until = |band error| in pitches: hold the descent above the slot until the
         # observed error is below it (at most hover_max steps, x/y steps up to hover_step_mm while holding)
         self.hover_until, self.hover_max, self.hover_step = hover_until, int(hover_max), float(hover_step_mm) / 1000
+        self.hover_tilt = None if hover_tilt_deg is None else float(hover_tilt_deg) / 20.0   # obs[2] units (20 deg)
         self.steps = self.path_steps + self.hover_steps + self.extra_steps + (self.hover_max if hover_until else 0)
         self.gen = torch.Generator(device=self.device).manual_seed(int(seed))
         J = np.load(job)
@@ -103,6 +105,7 @@ class DockEnv:
         self.phase = torch.zeros(n, dtype=torch.long, device=d)
         self.hold_count = torch.zeros(n, dtype=torch.long, device=d)
         self.last_err = torch.full((n,), 9.0, device=d)
+        self.last_tilt = torch.full((n,), 9.0, device=d)
         self.zdown = torch.zeros(n, device=d)
         self.residual = torch.zeros(n, 3, device=d)
         self.prev_action = torch.zeros(n, 3, device=d)
@@ -122,7 +125,7 @@ class DockEnv:
     def reset(self):
         n, d = self.n, self.device
         self.job = torch.randint(len(self.paths), (n,), generator=self.gen, device=d)
-        self.t.zero_(); self.phase.zero_(); self.hold_count.zero_(); self.last_err.fill_(9.0); self.zdown.zero_(); self.residual.zero_(); self.prev_action.zero_(); self.band_valid.zero_()
+        self.t.zero_(); self.phase.zero_(); self.hold_count.zero_(); self.last_err.fill_(9.0); self.last_tilt.fill_(9.0); self.zdown.zero_(); self.residual.zero_(); self.prev_action.zero_(); self.band_valid.zero_()
         self.terminated.zero_(); self.terminal_success.zero_()
         # In-hand uncertainty: hang +/-15 deg, translation each axis +/-15 mm, small tilt +/-3 deg.
         Rh = _axis_angle(self.hang_axis.expand(n, -1), self._uniform((n,), -math.radians(self.hang_deg), math.radians(self.hang_deg)))
@@ -274,6 +277,7 @@ class DockEnv:
                                         torch.full_like(self.t[advance], self.path_steps - 1))
         obs = self._observe()
         self.last_err = obs[:, 0].abs()
+        self.last_tilt = obs[:, 2].abs()
         e, ey, tilt = obs[:, 0], obs[:, 1], obs[:, 2]
         inside = e.abs() <= 0.5
         _, _, height_ok, angle_ok, _ = self.criteria()
@@ -296,7 +300,10 @@ class DockEnv:
         """Hover above the slot: after the fixed hover, at the start of the taught insert part of the path (t at
         hover_at), while the last observed band error is above hover_until and the hover budget is left."""
         at = self.t >= int(self.path_steps * 0.75)
-        return at & (self.t < self.path_steps - 1) & (self.last_err > self.hover_until) & (self.hold_count < self.hover_max)
+        off = self.last_err > self.hover_until
+        if self.hover_tilt is not None:                       # (Claude 10/29) also the plate plane before entering the tines
+            off |= self.last_tilt > self.hover_tilt
+        return at & (self.t < self.path_steps - 1) & off & (self.hold_count < self.hover_max)
 
     def success(self):
         x_ok, y_ok, height_ok, angle_ok, _ = self.criteria()

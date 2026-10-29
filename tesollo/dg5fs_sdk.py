@@ -455,6 +455,7 @@ def main():
     p.add_argument('--new_demo', action='store_true', help='forget the bowls / plates put in the basket earlier today')
     p.add_argument('--leg_enter', action='store_true', help='(old) the mover asks "start" and Enter before every arm leg')
     p.add_argument('--vel', type=float, default=60.0, help='arm speed deg/s (= deg/s^2) for every arm leg (default 60)')
+    p.add_argument('--grasp_ms', type=int, default=1500, help='hand motion time while grasping [ms] (보스 10/29: 1500)')
     p.add_argument('--motion_ms', type=int, default=3000, help='time per pose move [ms] (slow)')
     a = p.parse_args()
     VEL[0] = a.vel
@@ -595,8 +596,10 @@ def main():
         ask(f'2. grasp {mode.name.lstrip("_")} at {a.force} N (joints {[j + 1 for j in range(JOINTS) if hold[j]]} hold position).')
         check('position mode', g.set_position_mode_all(hold))
         check('grasp data', g.set_grasp_data(mode, a.force, 0, smooth))
+        check(f'grasp motion time {a.grasp_ms} ms', g.set_motion_time_all_equal(a.grasp_ms))   # (보스 10/29 'too fast')
         check('grasp', g.grasp(1))
-        time.sleep(2.0)
+        time.sleep(max(2.0, a.grasp_ms / 1000 + 0.5))
+        check('motion time', g.set_motion_time_all_equal(a.motion_ms))
         show()
         if a.lock:
             ask('2b. lock the grasping fingers at their current angles (position mode).')

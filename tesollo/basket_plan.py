@@ -172,6 +172,69 @@ def bowl_plan(a, k, Tbb, Tbc):
                           f'tesollo bowl to basket {a.quadrant} dx {a.dx:+.3f} dy {a.dy:+.3f}')
 
 
+# (보스 10/29) after the grasp the hand follows the 2F-85 gripper's insert path: the gripper pipeline's planner run for the
+# basket now, with the gripper holding a plate as in a real gripper run (its plate-in-tool and lift), its 11/3 demo
+# settings (calibration/config.yaml basket_quadrant_sim, keep face) and the plates already in the quadrant.  The hand
+# takes those joints with a constant wrist offset (J4-J6, --wrist; default = hand - gripper at the lift end), J1-J3 /
+# the offset ramped in over the first half of the carry from the hand's own lift.  No hand collision model.
+GRIPPER_REF = HERE.parent / 'calibration/data/real_pipeline/20261026_112417_plate_b1245h1g/preview_plan.json'   # 10/26 Q3 demo
+
+
+def gripper_path(a, k, Tbb, Tbc, mq, lift, grasp, home):
+    sys.path.insert(0, str(HERE.parent / 'rl'))
+    import basket_env as be
+    ref = json.loads(Path(a.gripper_ref).read_text())
+    Hg = np.array(ref['plate_in_tcp'])
+    tg = np.eye(4)
+    tg[2, 3] = pp.C['plate_ik_bc'].get('tool_length_m', 0.165)
+    g_lift = ref['legs']['lift']['waypoints_deg']
+    q = dict(pp.C['plate_ik_bc'], basket_carry_mode='rule', basket_carry_rrt_fallback=False)   # the gripper's own tool
+    sq = pp.C['plate_ik_bc']['basket_quadrant_sim'][mq] if 'basket_quadrant_sim' in pp.C['plate_ik_bc'] else pp.C['basket_quadrant_sim'][mq]
+    kw = dict(tilt_deg=sq['lean'] * be.B['full']['tine_lean_deg'][mq],
+              centre_h=sq['centre_h'] + q.get('basket_quadrant_sim_real_dh_m', 0.0),
+              x_shift_m=sq['aim_m'] + q.get('basket_quadrant_model_dx_m', {}).get(mq, 0.0),
+              faces=(-1.0, 1.0) if sq['flip'] else (1.0, -1.0),        # the demo's face first (keep_face alone: none at 10/29)
+              y_extra_m=q.get('basket_quadrant_sim_real_dy_m', {}).get(mq, 0.0))
+    rq = pp.robot_quadrants(Tbb)
+    plates = [(rq[v.split(':')[0]], pp.pin_gap(Tbb, rq[v.split(':')[0]], int(v.split(':')[1]))) for v in a.plates]
+    gap = pp.pin_gap(Tbb, mq, a.pin)
+    print(f'gripper path: plate-in-tool / lift from {a.gripper_ref}; {mq} gap {gap}, plates there {plates}, {kw}', flush=True)
+    path, rep_ = pp.quadrant_plan(Tbb, mq, gap, Hg, tg, g_lift[-1], Tbc, q, yaw_trim_deg=q.get('basket_quadrant_yaw_trim_deg', 0.0),
+                                  grasp_legs={'to_grasp': ref['legs']['to_grasp']['waypoints_deg'], 'lift': g_lift},
+                                  grasp_deg=ref['legs']['to_grasp']['waypoints_deg'][-1], plates=plates, **kw)
+    if path is None:
+        sys.exit('NO PLAN (gripper path): ' + str(__import__('collections').Counter(t[1].split(' ')[0] for t in rep_.get('tried', []))))
+    plan = json.loads(Path(path).read_text())
+    L = plan['legs']
+    h_end, g0 = np.array(lift[-1]), np.array(L['to_above']['waypoints_deg'][0])
+    off = np.zeros(6)
+    off[3:] = (h_end - g0)[3:] if a.wrist is None else np.array(a.wrist, float)
+    w = np.array(L['to_above']['waypoints_deg']) + off
+    ramp = np.clip(1 - np.linspace(0, 2, len(w)), 0, 1)[:, None]      # the hand's lift end -> the gripper path by mid-carry
+    w = w + ramp * (h_end - w[0])
+    L['to_above']['waypoints_deg'] = w.tolist()
+    for leg in ('descend', 'ascend'):
+        L[leg]['waypoints_deg'] = (np.array(L[leg]['waypoints_deg']) + off).tolist()
+    th = np.array(L['to_home']['waypoints_deg'])
+    L['to_home']['waypoints_deg'] = (th + np.linspace(1, 0, len(th))[:, None] * off).tolist()   # the offset fades out at home
+    L.pop('abort_home', None)
+    L['to_grasp']['waypoints_deg'] = [home, list(map(float, grasp))]
+    L['lift']['waypoints_deg'] = [list(map(float, x)) for x in lift]
+    lim = np.array([135.0 if j == 4 else (160.0 if j == 2 else 360.0) for j in range(6)]) - 3
+    for leg in ('to_above', 'descend', 'ascend', 'to_home'):
+        W = np.array(L[leg]['waypoints_deg'])
+        if (np.abs(W) > lim).any():
+            sys.exit(f'REFUSED (gripper path): {leg} beyond a joint limit with wrist offset {off[3:].round(1).tolist()}')
+    plan['source'] += f' | gripper path for the hand, wrist offset J4-J6 {off[3:].round(1).tolist()} deg (no hand collision check)'
+    Path(path).write_text(json.dumps(plan, indent=1))
+    print(f'wrist offset J4/J5/J6 {off[3:].round(1).tolist()} deg (--wrist d4 d5 d6 to change)', flush=True)
+    print(f'OK: gripper path, carry {rep_.get("carry")}, gripper clearance/margin {rep_.get("clearance_ratio")}')
+    for leg, v in L.items():
+        print(f'  {leg}: {len(v["waypoints_deg"])} waypoints, end {[round(x, 1) for x in v["waypoints_deg"][-1]]}')
+    merge_lift_carry(path)
+    print('plan:', path)
+
+
 def merge_lift_carry(path):
     """(as the gripper pipeline: 'lift + carry를 한 spline으로') lift + to_above as the single leg lift_carry."""
     mp = pp.merged_plan([(path, 'lift'), (path, 'to_above')], 'lift_carry')
@@ -197,6 +260,12 @@ def main():
     p.add_argument('--wrist_less', type=float, default=0.0,
                    help='(opt-in, 보스 10/29) turn the hand this much less from the grasp to the insert [deg], about the plate '
                         'bottom on the slot (the flat-plate model turns ~96; the real plate needs ~45 less)')
+    p.add_argument('--gripper_path', action='store_true', help='(보스 10/29) after the grasp follow the 2F-85 gripper insert '
+                   'path (its planner at this basket) with a wrist offset; no hand collision check')
+    p.add_argument('--gripper_ref', default=str(GRIPPER_REF), help='real gripper run preview_plan.json: plate-in-tool + lift')
+    p.add_argument('--wrist', type=float, nargs=3, help='--gripper_path: J4 J5 J6 offset [deg] on the gripper joints '
+                   '(default: hand - gripper at the lift end)')
+    p.add_argument('--plates', nargs='*', default=[], help='--gripper_path: plates already in the basket, Q3:6 ...')
     p.add_argument('--rise', type=float, default=0.12, help='lift before the carry (arm_plan.py lift)')
     p.add_argument('--basket', default=str(FIXED_BASKET), help='basket_vision.json (T); default the fixed 11/3 file (stale: '
                                                                 'measure it, see dg5fs_sdk.py / calibration/basket_vision.py)')
@@ -256,6 +325,8 @@ def main():
     Tbc = np.array(cc.load_json(cc.latest_t_base_cam())['T_base_cam'])
     print(f'basket {Tbb[:3, 3].round(3).tolist()} from {a.basket}; {a.quadrant} (model {model_qd}) pin {a.pin} -> gap {gap}; '
           f'plate centre {np.round(centre, 3).tolist()}', flush=True)
+    if a.gripper_path:
+        return gripper_path(a, k, Tbb, Tbc, model_qd, lift, grasp, home)
     grasp_legs = {'to_grasp': [home, list(map(float, grasp))], 'lift': [list(map(float, w)) for w in lift]}
     kw = {}
     if a.sim_corr:

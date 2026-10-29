@@ -93,6 +93,7 @@ BASKET = {}                 # the last basket plan of this run (basket_plan.py):
 # the 1st plate front (small pin numbers, far from the robot), the 2nd back in the same quadrant.  What went in is kept in
 # DEMO_STATE across runs (one run = one object); a new day or --new_demo starts it empty.
 DEMO_STATE = Path('/tmp/tesollo_demo_state.json')
+GRIPPER = [False, None]     # (--gripper_path [--wrist d4 d5 d6], 보스 10/29) plate: the 2F-85 insert path + a wrist offset
 TEACH = [False]             # (--teach, 보스 10/29) plate: the plan stops above the basket, the insert is taught by the pendant
 TAUGHT = REPO / 'tesollo/taught_inserts.json'   # every taught insert: joints + basket pose + plate in the hand
 SEEN = {}                   # quadrant -> 'bowl' / 'plate' / None, the fixed camera at the start of this run (empty_quadrant.py)
@@ -198,7 +199,9 @@ def basket(obj, quadrant, pin, centre_h=None):
                           '--pin', str(pin), '--dx', str(SHIFT[0]), '--dy', str(SHIFT[1])]
                          + (['--centre_h', str(centre_h)] if centre_h is not None else [])
                          + (['--sim_corr', SIM_CORR[0]] if SIM_CORR[0] and obj == 'plate' else [])
-                         + (['--wrist_less', str(WRIST_LESS[0])] if WRIST_LESS[0] and obj == 'plate' else [])
+                         + (['--wrist_less', str(WRIST_LESS[0])] if WRIST_LESS[0] and obj == 'plate' and not GRIPPER[0] else [])
+                         + (['--gripper_path', '--plates'] + [f'{p_["q"]}:{p_["pin"]}' for p_ in load_state()['plates']]
+                            + (['--wrist'] + [str(v) for v in GRIPPER[1]] if GRIPPER[1] else []) if GRIPPER[0] and obj == 'plate' else [])
                          + (['--basket', BASKET_JSON[0]] if BASKET_JSON[0] else []), capture_output=True, text=True)
     print('\n'.join(l for l in out.stdout.splitlines() if l.startswith(('basket', 'OK', '  ', 'merged', 'wrist'))), flush=True)
     m = re.search(r'^plan: (\S+)', out.stdout, re.M)
@@ -359,6 +362,9 @@ def main():
                                                   '(absolute path); use after tesollo/measure_held.py')
     p.add_argument('--wrist_less', type=float, default=45.0, help='(plate) turn the hand this much less from the grasp to the '
                    'insert than the flat-plate plan [deg] (보스 10/29: 45; 0 = the old plan)')
+    p.add_argument('--gripper_path', action='store_true', help='(plate) after the grasp follow the 2F-85 gripper insert path '
+                   '(its planner at the measured basket) with a J4-J6 offset; no hand collision check')
+    p.add_argument('--wrist', type=float, nargs=3, help='--gripper_path: J4 J5 J6 offset [deg] (default hand - gripper at the lift end)')
     p.add_argument('--teach', action='store_true', help='(plate) the arm stops above the basket; teach the insert with the '
                    'pendant, Enter records the joints (tesollo/taught_inserts.json); release, then back the same way + home')
     p.add_argument('--new_demo', action='store_true', help='forget the bowls / plates put in the basket earlier today')
@@ -368,6 +374,7 @@ def main():
     a = p.parse_args()
     VEL[0] = a.vel
     TEACH[0] = a.teach
+    GRIPPER[:] = [a.gripper_path, a.wrist]
     MOVER_GO[:] = [] if a.leg_enter else MOVER_GO
     WRIST_LESS[0] = a.wrist_less
     SIM_CORR[0] = str(Path(a.sim_corr).resolve()) if a.sim_corr else ''

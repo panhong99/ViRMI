@@ -323,6 +323,7 @@ def main():
             landed[e] = kb
         rollout.diag = diag
         rollout.nerr = nerr_all
+        rollout.final_b = np.stack([Tbi @ np.r_[np.c_[Rm[e], p[e]], [[0, 0, 0, 1]]] for e in range(N)])   # plate root in basket
         rollout.loose = loose
         rollout.hand_hit = hand_hit.cpu().numpy()
         rollout.hand_max_force = hand_max_force.cpu().numpy()
@@ -375,7 +376,8 @@ def main():
         if dock is not None:                                   # (Claude 10/29) per env, to match kinematic vs physics
             out['dock_samples'] = [dict(env=int(e), job=int(job_of[e]), target_gap=int(gap_t[job_of[e]]), landed=int(landed[e]),
                                         strict=bool(ok[e]), plane_err_deg=round(float(rollout.nerr[e]), 2),
-                                        low_mm=round(float(d[e, 3]) * 1000, 1)) for e in range(N)]
+                                        low_mm=round(float(d[e, 3]) * 1000, 1),
+                                        final_T_basket=np.round(rollout.final_b[e], 5).tolist()) for e in range(N)]
     else:
         mu = np.zeros((nj, 3))
         sd = np.tile([0.02, 0.01, 0.01], (nj, 1))

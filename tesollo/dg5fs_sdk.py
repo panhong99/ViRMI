@@ -84,13 +84,16 @@ SHIFT = [0.0, 0.0]          # object shift from the taught spot (perceive), appl
 SIM_CORR = ['']             # (--sim_corr) rl/hand_basket.py CEM json passed to basket_plan.py for the plate
 WRIST_LESS = [45.0]         # (보스 10/29 real Q3 photo) plate: the hand turns this much less than the flat-plate plan
 BASKET_JSON = ['']          # (10/29) the basket measured at the start (calibration/basket_vision.py), for every basket plan
+MOVER_GO = ['--opening_done', '--auto']   # (보스 10/29) this script's own Enter / command starts a step; its legs then run
+                            # on without the mover's 'start' + Enter per leg (--leg_enter: the old prompts)
 BASKET = {}                 # the last basket plan of this run (basket_plan.py): its path, for 'descend'
 
 
 def mover(plan, leg, v):
     """One mover leg (Enter to go); True if it ran."""
     r = subprocess.run(['bash', str(REPO / 'calibration/run.sh'), 'mover', '--plan', plan, '--leg', leg, '--smooth',
-                        '--go_per', 'leg', '--vel_deg_s', str(v), '--acc_deg_s2', str(v), '--execute', '--go_enter'])
+                        '--go_per', 'leg', '--vel_deg_s', str(v), '--acc_deg_s2', str(v), '--execute', '--go_enter']
+                       + MOVER_GO)
     if r.returncode:
         print(f'   mover stopped at {leg} (exit {r.returncode})', flush=True)
     return r.returncode == 0
@@ -138,7 +141,7 @@ def arm_legs(obj, legs):
         name = f'{"plate" if obj == "plate" else "bowl"}_{leg}'
         r = subprocess.run(['bash', str(REPO / 'calibration/run.sh'), 'mover', '--plan', m.group(1), '--leg', name,
                             '--smooth', '--go_per', 'leg', '--vel_deg_s', str(v), '--acc_deg_s2', str(v),
-                            '--execute', '--go_enter'])
+                            '--execute', '--go_enter'] + MOVER_GO)
         if r.returncode:
             print(f'   mover stopped at {name} (exit {r.returncode})', flush=True)
             return False
@@ -192,10 +195,12 @@ def main():
                                                   '(absolute path); use after tesollo/measure_held.py')
     p.add_argument('--wrist_less', type=float, default=45.0, help='(plate) turn the hand this much less from the grasp to the '
                    'insert than the flat-plate plan [deg] (보스 10/29: 45; 0 = the old plan)')
+    p.add_argument('--leg_enter', action='store_true', help='(old) the mover asks "start" and Enter before every arm leg')
     p.add_argument('--vel', type=float, default=80.0, help='arm speed deg/s (= deg/s^2) for every arm leg (default 80)')
     p.add_argument('--motion_ms', type=int, default=3000, help='time per pose move [ms] (slow)')
     a = p.parse_args()
     VEL[0] = a.vel
+    MOVER_GO[:] = [] if a.leg_enter else MOVER_GO
     WRIST_LESS[0] = a.wrist_less
     SIM_CORR[0] = str(Path(a.sim_corr).resolve()) if a.sim_corr else ''
     held = None

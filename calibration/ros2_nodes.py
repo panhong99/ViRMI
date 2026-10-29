@@ -384,7 +384,12 @@ def run_mover(argv=None):
 
     print(f'\nThis will move the REAL robot, {"ONE smooth spline through the leg" if args.smooth else "one confirmed move at a time"}, '
           f'at {args.vel_deg_s} deg/s.')
-    if not args.opening_done and input(f'Type exactly "{OPENING}" to continue: ').strip() != OPENING:
+    if not args.opening_done and args.go_enter:   # (10/29 보스) Enter starts; a typo asks again instead of ending the sequence
+        while (ans := input(f'Enter (or "{OPENING}") to continue, "q" to stop: ').strip()) not in ('', OPENING):
+            if ans.lower() in ('q', 'quit', 'stop', 'abort', 'exit'):
+                sys.exit('aborted')
+            print(f'  "{ans}" - nothing sent; Enter or q', flush=True)
+    elif not args.opening_done and input(f'Type exactly "{OPENING}" to continue: ').strip() != OPENING:
         sys.exit('aborted')
     if args.smooth:
         if args.auto and not args.opening_done:

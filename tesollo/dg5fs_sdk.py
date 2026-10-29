@@ -216,7 +216,7 @@ def basket(obj, quadrant, pin, centre_h=None):
     # (보스 10/27, as the 2F-85 pipeline) grasp -> above the basket in ONE spline (lift + to_above), then the descent
     legs = [(mg.group(1), 'lift_carry'), (m.group(1), 'descend')] if mg else [(m.group(1), lg) for lg in BASKET_LEGS]
     if TEACH[0] and obj == 'plate':                     # (보스 10/29) only up to above the basket; the insert by the pendant
-        legs = legs[:1] if mg else [(m.group(1), lg) for lg in BASKET_LEGS[:2]]
+        legs = [(teach_stop(m.group(1), mg.group(1) if mg else None), 'lift_carry')]
     for plan, leg in legs:
         if not mover(plan, leg, VEL[0]):
             return False
@@ -239,6 +239,25 @@ def robot_joints():
         print(f'   joints not read: {out.stderr.strip()[-300:]}', flush=True)
         return None
     return json.loads(out.stdout.strip().splitlines()[-1])
+
+
+def teach_stop(plan_path, merged_path):
+    """(보스 10/29: --teach went on down) to_above ends with the rule carry's straight drop onto the above pose (from
+    quadrant_plan drop_start): for teaching the arm stops at the carry height over the slot, before that drop."""
+    plan = json.loads(Path(plan_path).read_text())
+    ds = int(plan.get('quadrant_plan', {}).get('drop_start') or len(plan['legs']['to_above']['waypoints_deg']) - 1)
+    lift = plan['legs']['lift']['waypoints_deg']
+    if merged_path:
+        mp = json.loads(Path(merged_path).read_text())
+        mp['legs']['lift_carry']['waypoints_deg'] = mp['legs']['lift_carry']['waypoints_deg'][:len(lift) + ds]
+    else:
+        mp = plan
+        mp['legs']['lift_carry'] = dict(plan['legs']['to_above'], waypoints_deg=lift + plan['legs']['to_above']['waypoints_deg'][1:ds + 1])
+    out = Path(plan_path).with_name('plan_teach_stop.json')
+    out.write_text(json.dumps(mp, indent=1))
+    print(f'   teach: the arm stops over the slot at the carry height (to_above {ds}/{len(plan["legs"]["to_above"]["waypoints_deg"]) - 1}, '
+          'no drop)', flush=True)
+    return str(out)
 
 
 def teach_insert(plan_path, quadrant, pin):

@@ -237,7 +237,7 @@ def _basket_image_polygon(K, Tbc, Tb):
 
 
 def _in_basket(det, polygon, shape):
-    if polygon is None:
+    if polygon is None or len(polygon) < 3:
         return False
     _, _, (x0, y0, x1, y1), mask = det
     cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
@@ -254,9 +254,17 @@ def draw_audience(rgb, dets, K, Tbc, Tb, chosen=None):
     """Clean audience view: the pick plate is `target`; any detected object in the basket is `obstacle`."""
     img = rgb.copy()
     polygon = _basket_image_polygon(K, Tbc, Tb)
+    # (보스 10/29: bowls in the basket came as 'target' - no measured basket in that view) the YOLOE rack box counts as the
+    # basket too: an object on its pixels is an obstacle
+    racks = [d for d in dets if d[0] == 'dish drying rack']
+    rack = None
+    if racks:
+        rx0, ry0, rx1, ry1 = max(racks, key=lambda d: d[1])[2]
+        rack = np.array([[rx0, ry0], [rx1, ry0], [rx1, ry1], [rx0, ry1]], np.int32)
     for det in audience_objects(dets):
         name, _, (x0, y0, x1, y1), mask = det
-        role = 'obstacle' if _in_basket(det, polygon, img.shape[:2]) else f'target: {name}'   # (보스 10/29) bowls on the table too
+        inside = _in_basket(det, polygon, img.shape[:2]) or _in_basket(det, rack, img.shape[:2])
+        role = 'obstacle' if inside else f'target: {name}'   # (보스 10/29) bowls on the table too
         col = np.asarray((245, 80, 70) if role == 'obstacle' else (40, 210, 255), np.uint8)
         if mask is not None and mask.shape == img.shape[:2]:
             img[mask] = (0.72 * img[mask] + 0.28 * col).astype(np.uint8)

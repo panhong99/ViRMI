@@ -5574,3 +5574,9 @@ plate 삽입 +y 5 cm, 손목 회전 30–45° 이내, 오늘 밤 sim에서 핸�
 - 실측 반복: 5장 간 0.3–0.9 mm. 단 4회 연속 5장 중 1장이 180° 뒤집힘(→ 다수결로 해결, 4/5 미만이면 거부).
 - 위치 의존성 시험(오프라인): 실측 바구니 ±5 cm(x, y), ±8° 회전 7가지 모두 plate Q3 핀 6 · bowl Q3 계획 승인.
 - Codex CP(관객 GUI, YOLOE 최대 fps) 작업판에 올림.
+
+
+### 2026-10-29 10:1x Codex — CP 관객용 GUI 완료
+- 실행 명령: `DEMO_AUDIENCE=1 bash calibration/run.sh demo1103` (`--execute`는 보스가 실증할 때만 추가).
+- 측정 fps (저장 D455 프레임, YOLOE 전체+zoom 2-pass, warmup 3 + 15회): 640/FP32/zoom2.0 **33.65**, 512/FP32/2.0 **36.19**, 512/FP16/2.0 **36.79**(선택), 416/FP16/2.0 **37.20**, 512/FP16/1.5 **37.27**. 512/FP16/2.0은 기존 대비 +9.3%; 416·zoom1.5의 추가 이득은 약 1%라 작은 bowl detail을 보존하려고 쓰지 않음. 실카메라는 이번 heartbeat 금지 지침에 따라 열지 않았고 저장 프레임 기준이다.
+- 화면 캡처: `outputs/demo_audience_20261029/audience_512_fp16.png` (설정표 `fps_offline.tsv`, 상세 `summary.md`).

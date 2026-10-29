@@ -700,7 +700,7 @@ def run_viz(a):
         if 'plate_in_tcp' in plan:                                      # mesh root = plate bottom, 1 cm under the centre
             off = np.eye(4)
             off[2, 3] = -0.01
-            state['held'] = box_pose([0, 0, tcp_m]) @ np.array(plan['plate_in_tcp']) @ off
+            state['held'] = box_pose([0, 0, plan.get('tool_length_m', tcp_m)]) @ np.array(plan['plate_in_tcp']) @ off   # (10/29) Tesollo 0.12
             cnt = lambda lgs: sum(len(plan['legs'][lg]['waypoints_deg']) for lg in lgs if lg in plan['legs'])   # noqa: E731
             state['grasp_k'] = at[max(cnt(('to_grasp',)) - 1, 0)]
             state['release_k'] = at[max(cnt(('to_grasp', 'lift', 'to_above', 'descend')) - 1, 0)]

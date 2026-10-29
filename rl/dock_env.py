@@ -48,10 +48,17 @@ class DockEnv:
     def __init__(self, num_envs=2048, steps=48, hover_steps=16, device="cuda:0", seed=0,
                  job=DEFAULT_JOB, camera=DEFAULT_CAMERA, hang_deg=15.0,
                  grip_mm=15.0, tilt_deg=3.0, basket_xy_mm=10.0,
-                 basket_yaw_deg=1.0, pitch_frac=0.05, lean_deg=3.0):
+                 basket_yaw_deg=1.0, pitch_frac=0.05, lean_deg=3.0, descend_extra_mm=0.0,
+                 residual_xy_mm=80.0, residual_pitch_deg=15.0, hover_until=None, hover_max=120, hover_step_mm=2.0):
         self.device = torch.device(device)
         self.n, self.path_steps, self.hover_steps = int(num_envs), int(steps), int(hover_steps)
-        self.steps = self.path_steps + self.hover_steps
+        # (Claude 10/29 3rd review, opt-in) after the taught end keep going down 2 mm a step until floor contact,
+        # at most descend_extra_mm: the in-hand z error otherwise leaves the plate above the floor (height 0.64)
+        self.extra_steps = int(math.ceil(float(descend_extra_mm) / 2.0))
+        # (opt-in, 보스 10/29 'docking') hover_until = |band error| in pitches: hold the descent above the slot until the
+        # observed error is below it (at most hover_max steps, x/y steps up to hover_step_mm while holding)
+        self.hover_until, self.hover_max, self.hover_step = hover_until, int(hover_max), float(hover_step_mm) / 1000
+        self.steps = self.path_steps + self.hover_steps + self.extra_steps + (self.hover_max if hover_until else 0)
         self.gen = torch.Generator(device=self.device).manual_seed(int(seed))
         J = np.load(job)
         names = [str(x) for x in J["names"]]
@@ -82,7 +89,8 @@ class DockEnv:
         self.basket_xy_m, self.basket_yaw_deg = float(basket_xy_mm) / 1000, float(basket_yaw_deg)
         self.pitch_frac, self.lean_deg = float(pitch_frac), float(lean_deg)
         self.action_scale = torch.tensor([0.002, 0.002, math.radians(1.0)], device=self.device)
-        self.residual_limit = torch.tensor([0.080, 0.080, math.radians(15.0)], device=self.device)
+        self.residual_limit = torch.tensor([residual_xy_mm / 1000, residual_xy_mm / 1000, math.radians(residual_pitch_deg)],
+                                           device=self.device)
         th = torch.linspace(0, 2 * math.pi, 17, device=self.device)[:-1]
         self.rim_local = torch.stack((self.plate_r * torch.cos(th), self.plate_r * torch.sin(th),
                                       torch.zeros_like(th)), 1)
@@ -93,6 +101,9 @@ class DockEnv:
         self.job = torch.zeros(n, dtype=torch.long, device=d)
         self.t = torch.zeros(n, dtype=torch.long, device=d)
         self.phase = torch.zeros(n, dtype=torch.long, device=d)
+        self.hold_count = torch.zeros(n, dtype=torch.long, device=d)
+        self.last_err = torch.full((n,), 9.0, device=d)
+        self.zdown = torch.zeros(n, device=d)
         self.residual = torch.zeros(n, 3, device=d)
         self.prev_action = torch.zeros(n, 3, device=d)
         self.Tbb = torch.eye(4, device=d).repeat(n, 1, 1)
@@ -111,7 +122,7 @@ class DockEnv:
     def reset(self):
         n, d = self.n, self.device
         self.job = torch.randint(len(self.paths), (n,), generator=self.gen, device=d)
-        self.t.zero_(); self.phase.zero_(); self.residual.zero_(); self.prev_action.zero_(); self.band_valid.zero_()
+        self.t.zero_(); self.phase.zero_(); self.hold_count.zero_(); self.last_err.fill_(9.0); self.zdown.zero_(); self.residual.zero_(); self.prev_action.zero_(); self.band_valid.zero_()
         self.terminated.zero_(); self.terminal_success.zero_()
         # In-hand uncertainty: hang +/-15 deg, translation each axis +/-15 mm, small tilt +/-3 deg.
         Rh = _axis_angle(self.hang_axis.expand(n, -1), self._uniform((n,), -math.radians(self.hang_deg), math.radians(self.hang_deg)))
@@ -134,7 +145,7 @@ class DockEnv:
     def _plate_pose_at(self, path_index):
         P = self.paths[self.job, path_index] @ self.H
         # Basket-frame translation residual, and a small pitch about basket y at the plate centre.
-        shift = (self.Tbb[:, :3, :3] @ torch.cat((self.residual[:, :2], torch.zeros(self.n, 1, device=self.device)), 1)[..., None]).squeeze(-1)
+        shift = (self.Tbb[:, :3, :3] @ torch.cat((self.residual[:, :2], -self.zdown[:, None]), 1)[..., None]).squeeze(-1)
         P[:, :3, 3] += shift
         Ry = _axis_angle(self.Tbb[:, :3, 1], self.residual[:, 2])
         P[:, :3, :3] = Ry @ P[:, :3, :3]
@@ -243,15 +254,26 @@ class DockEnv:
         remaining = 1.0 - self.phase.float() / (self.steps - 1)
         taper = 0.25 + 0.75 * remaining
         scale = self.action_scale[None] * taper[:, None]
+        if self.hover_until is not None:                      # holding: full-size steps, no taper
+            holding = self._holding()
+            big = self.action_scale.clone()
+            big[:2] = self.hover_step
+            scale = torch.where(holding[:, None], big[None].expand_as(scale), scale)
         candidate = self.residual + action * scale
         candidate = torch.maximum(torch.minimum(candidate, self.residual_limit), -self.residual_limit)
         self.residual[active] = candidate[active]
         self.prev_action[active] = action[active]
         self.phase[active] += 1
         advance = active & (self.phase > self.hover_steps)
+        if self.hover_until is not None:
+            advance &= ~self._holding()
+            self.hold_count += (active & self._holding()).long()
+        at_end = advance & (self.t >= self.path_steps - 1)
+        self.zdown[at_end] = torch.clamp(self.zdown[at_end] + 0.002, max=self.extra_steps * 0.002)
         self.t[advance] = torch.minimum(self.t[advance] + 1,
                                         torch.full_like(self.t[advance], self.path_steps - 1))
         obs = self._observe()
+        self.last_err = obs[:, 0].abs()
         e, ey, tilt = obs[:, 0], obs[:, 1], obs[:, 2]
         inside = e.abs() <= 0.5
         _, _, height_ok, angle_ok, _ = self.criteria()
@@ -269,6 +291,12 @@ class DockEnv:
         self.last_info = dict(success=self.terminal_success, along=e, across=ey,
                               angle_ok=angle_ok, height_ok=height_ok)
         return obs, reward, self.terminated, self.last_info
+
+    def _holding(self):
+        """Hover above the slot: after the fixed hover, at the start of the taught insert part of the path (t at
+        hover_at), while the last observed band error is above hover_until and the hover budget is left."""
+        at = self.t >= int(self.path_steps * 0.75)
+        return at & (self.t < self.path_steps - 1) & (self.last_err > self.hover_until) & (self.hold_count < self.hover_max)
 
     def success(self):
         x_ok, y_ok, height_ok, angle_ok, _ = self.criteria()

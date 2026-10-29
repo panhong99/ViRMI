@@ -169,11 +169,14 @@ def main():
             out.append(Tg @ Rh @ Rt @ H_nom)
         return np.array(out)
 
-    def rollout(job_of, corr, Hs, dock_residual=None):
-        """job index, correction (dx, dy, dz basket frame) and H per env -> success (N,) and landed info."""
-        L = max(len(flange[j]) for j in range(nj))
+    def rollout(job_of, corr, Hs, dock_residual=None, dock_zdown=None):
+        """job index, correction (dx, dy, dz basket frame) and H per env -> success (N,) and landed info.
+        dock_zdown (N,) [m] (Claude 10/29, opt-in in the bundle): after the path end keep lowering the plate 2 mm a
+        step along basket -z by that much before the release, as DockEnv(descend_extra_mm) does."""
+        n_extra = np.zeros(N, int) if dock_zdown is None else np.ceil(np.asarray(dock_zdown) / 0.002 - 1e-6).astype(int)
+        L = max(len(flange[j]) for j in range(nj)) + int(n_extra.max())
         step = np.array([np.linalg.norm(flange[j][1][:3, 3] - flange[j][0][:3, 3]) for j in range(nj)])
-        n_move = int(math.ceil(max(len(flange[j]) * step[j] for j in range(nj)) / a.speed / dt))
+        n_move = int(math.ceil(max((len(flange[j]) + int(n_extra.max())) * step[j] for j in range(nj)) / a.speed / dt))
         shift_base = np.einsum('ij,nj->ni', Tbb[:3, :3], corr)   # basket-frame correction -> base
         poses = np.zeros((N, L, 7))
         for e in range(N):
@@ -189,13 +192,17 @@ def main():
                 centre_path[:, :3, 3] += (Tbb[:3, :3] @ np.c_[rr[:, :2], np.zeros(len(rr))].T).T
                 for k in range(len(centre_path)):
                     centre_path[k, :3, :3] = R.from_rotvec(Tbb[:3, 1] * rr[k, 2]).as_matrix() @ centre_path[k, :3, :3]
+            if n_extra[e]:
+                down = np.repeat(centre_path[-1:], n_extra[e], 0)
+                down[:, :3, 3] -= np.outer(np.minimum(np.arange(1, n_extra[e] + 1) * 0.002, dock_zdown[e]), Tbb[:3, 2])
+                centre_path = np.concatenate([centre_path, down])
             P = centre_path @ root_off
             P = np.concatenate([P, np.repeat(P[-1:], L - len(P), 0)])
             poses[e, :, :3] = P[:, :3, 3] + org[e]
             qx = R.from_matrix(P[:, :3, :3]).as_quat()
             poses[e, :, 3:] = np.c_[qx[:, 3], qx[:, :3]]
         poses_t = torch.tensor(poses, dtype=torch.float32, device=dev)
-        lens = torch.tensor([len(flange[j]) for j in job_of], device=dev)
+        lens = torch.tensor([len(flange[j]) + int(n_extra[e]) for e, j in enumerate(job_of)], device=dev)
         zero = torch.zeros(N, 6, device=dev)
         hand_hit = torch.zeros(N, dtype=torch.bool, device=dev)
         hand_max_force = torch.zeros(N, device=dev)
@@ -299,7 +306,8 @@ def main():
         job_of = dock['job'].astype(int) if dock is not None else np.repeat(np.arange(nj), per)
         corr = np.array([corr_d.get(names[j], [0.0, 0.0, 0.0]) for j in job_of], float)
         Hs = dock['H'] if dock is not None else h_true(N)
-        ok, landed = rollout(job_of, corr, Hs, dock['residual'] if dock is not None else None)
+        ok, landed = rollout(job_of, corr, Hs, dock['residual'] if dock is not None else None,
+                             dock['zdown'] if dock is not None and 'zdown' in dock else None)
         d = rollout.diag
         collision_free = ok & ~rollout.hand_hit
         res = {names[j]: dict(success=f'{int(ok[job_of == j].sum())}/{int((job_of == j).sum())}',

@@ -93,6 +93,8 @@ BASKET = {}                 # the last basket plan of this run (basket_plan.py):
 # the 1st plate front (small pin numbers, far from the robot), the 2nd back in the same quadrant.  What went in is kept in
 # DEMO_STATE across runs (one run = one object); a new day or --new_demo starts it empty.
 DEMO_STATE = Path('/tmp/tesollo_demo_state.json')
+TEACH = [False]             # (--teach, 보스 10/29) plate: the plan stops above the basket, the insert is taught by the pendant
+TAUGHT = REPO / 'tesollo/taught_inserts.json'   # every taught insert: joints + basket pose + plate in the hand
 SEEN = {}                   # quadrant -> 'bowl' / 'plate' / None, the fixed camera at the start of this run (empty_quadrant.py)
 BOWL_QUADRANTS = ('Q1', 'Q2', 'Q4', 'Q3')       # far ones first: Q3 / Q4 stay free for the plates
 PLATE_QUADRANTS = ('Q3', 'Q4')
@@ -204,17 +206,88 @@ def basket(obj, quadrant, pin, centre_h=None):
         print(f'   basket plan failed:\n{out.stdout[-600:]}{out.stderr[-600:]}', flush=True)
         return None
     BASKET['plan'], BASKET['target'] = m.group(1), (obj, quadrant, pin)
+    BASKET.pop('out_leg', None)
     print(f'   basket plan {m.group(1)} (after the release: ascend, to_home with run.sh mover)', flush=True)
     BASKET['down'] = False
     mg = re.search(r'^merged: (\S+plan\.json)', out.stdout, re.M)
     # (보스 10/27, as the 2F-85 pipeline) grasp -> above the basket in ONE spline (lift + to_above), then the descent
     legs = [(mg.group(1), 'lift_carry'), (m.group(1), 'descend')] if mg else [(m.group(1), lg) for lg in BASKET_LEGS]
+    if TEACH[0] and obj == 'plate':                     # (보스 10/29) only up to above the basket; the insert by the pendant
+        legs = legs[:1] if mg else [(m.group(1), lg) for lg in BASKET_LEGS[:2]]
     for plan, leg in legs:
         if not mover(plan, leg, VEL[0]):
             return False
+    if TEACH[0] and obj == 'plate' and not teach_insert(m.group(1), quadrant, pin):
+        return False
     BASKET['down'] = True
     record(*BASKET['target'])
     print('   in the basket: type "release"', flush=True)
+    return True
+
+
+def robot_joints():
+    """The M1013 joints [deg] now (read-only ROS service, tesollo/read_posj.py), or None."""
+    cmd = ['env', '-u', 'PYTHONPATH', '-u', 'PYTHONHOME', '-u', 'LD_LIBRARY_PATH', '-u', 'CONDA_PREFIX', '-u',
+           'CONDA_DEFAULT_ENV', 'PATH=/usr/bin:/bin', 'bash', '-c',
+           f'source /opt/ros/jazzy/setup.bash; source {REPO.parent / "doosan_ws/install/setup.bash"}; '
+           f'exec /usr/bin/python3 {REPO / "tesollo/read_posj.py"}']
+    out = subprocess.run(cmd, capture_output=True, text=True, timeout=40)
+    if out.returncode:
+        print(f'   joints not read: {out.stderr.strip()[-300:]}', flush=True)
+        return None
+    return json.loads(out.stdout.strip().splitlines()[-1])
+
+
+def teach_insert(plan_path, quadrant, pin):
+    """(보스 10/29) the arm waits above the basket; 보스 teaches the insert with the pendant.  Enter records the joints
+    (each pendant point), 'done' ends (the last record = the insert pose), 'undo' drops the last one.  Saved to TAUGHT
+    with the basket pose and the plate in the hand; the way back for step 5 = the records reversed -> above -> to_home."""
+    above = robot_joints()
+    if above is None:
+        print('   ROS joints needed for teaching (Doosan bringup on?): fix it and type "basket" again', flush=True)
+        return False
+    pts = []
+    print(f'\n   TEACH {quadrant} pin {pin}: move the plate in with the pendant.  Enter = record the joints now, '
+          '"undo" = drop the last, "done" = finished (the last record is the insert pose)', flush=True)
+    while True:
+        cmd = input(f'   teach [{len(pts)} recorded]> ').strip().lower()
+        if cmd == 'undo' and pts:
+            print(f'   dropped {pts.pop()}', flush=True)
+        elif cmd == 'done':
+            q = robot_joints()
+            if not pts or (q and max(abs(x - y) for x, y in zip(q, pts[-1])) > 0.5):
+                print('   record the final insert pose first (Enter at the insert), then done', flush=True)
+                continue
+            break
+        elif cmd == '':
+            q = robot_joints()
+            if q:
+                pts.append([round(v, 3) for v in q])
+                print(f'   {len(pts)}: {pts[-1]}', flush=True)
+        else:
+            print('   Enter / undo / done', flush=True)
+    plan = json.loads(Path(plan_path).read_text())
+    entry = dict(time=time.strftime('%Y-%m-%d %H:%M:%S'), quadrant=quadrant, pin=pin, plan=plan_path,
+                 basket_T=plan.get('basket_T'), plate_in_tcp=plan.get('plate_in_tcp'), above_deg=above, waypoints_deg=pts)
+    try:
+        allt = json.loads(TAUGHT.read_text())
+    except (OSError, ValueError):
+        allt = []
+    TAUGHT.write_text(json.dumps(allt + [entry], indent=1))
+    print(f'   taught insert saved: {TAUGHT} (#{len(allt) + 1}, {len(pts)} points)', flush=True)
+    plan['created'] = time.strftime('%Y-%m-%d %H:%M:%S')
+    plan['source'] = plan.get('source', '') + ' + taught insert (pendant)'
+    back, keys = [], [pts[-1]] + pts[-2::-1] + [above]
+    for qa, qb in zip(keys[:-1], keys[1:]):                       # joint-space line between the records, <= 2 deg steps
+        steps = max(1, int(max(abs(x - y) for x, y in zip(qa, qb)) / 2.0) + 1)
+        back += [[x + (y - x) * i / steps for x, y in zip(qa, qb)] for i in range(steps)]
+    back.append(above)
+    plan['legs']['taught_out'] = dict(waypoints_deg=back, planner='taught reversed', clearance_m=None,
+                                      min_clearance_straight_m=plan.get('margin_m', 0.0))
+    plan['legs']['to_home']['waypoints_deg'][0] = above
+    out = Path(plan_path).with_name('plan_taught_out.json')
+    out.write_text(json.dumps(plan, indent=1))
+    BASKET['plan'], BASKET['out_leg'] = str(out), 'taught_out'
     return True
 
 
@@ -286,12 +359,15 @@ def main():
                                                   '(absolute path); use after tesollo/measure_held.py')
     p.add_argument('--wrist_less', type=float, default=45.0, help='(plate) turn the hand this much less from the grasp to the '
                    'insert than the flat-plate plan [deg] (보스 10/29: 45; 0 = the old plan)')
+    p.add_argument('--teach', action='store_true', help='(plate) the arm stops above the basket; teach the insert with the '
+                   'pendant, Enter records the joints (tesollo/taught_inserts.json); release, then back the same way + home')
     p.add_argument('--new_demo', action='store_true', help='forget the bowls / plates put in the basket earlier today')
     p.add_argument('--leg_enter', action='store_true', help='(old) the mover asks "start" and Enter before every arm leg')
     p.add_argument('--vel', type=float, default=80.0, help='arm speed deg/s (= deg/s^2) for every arm leg (default 80)')
     p.add_argument('--motion_ms', type=int, default=3000, help='time per pose move [ms] (slow)')
     a = p.parse_args()
     VEL[0] = a.vel
+    TEACH[0] = a.teach
     MOVER_GO[:] = [] if a.leg_enter else MOVER_GO
     WRIST_LESS[0] = a.wrist_less
     SIM_CORR[0] = str(Path(a.sim_corr).resolve()) if a.sim_corr else ''
@@ -424,7 +500,8 @@ def main():
         # 'release' opens the hand; Enter shows joints / currents / temperature, Ctrl+C and q do NOT let go here
         print('\n3. HOLDING.  "home" = lift + home;  "basket" = the empty quadrant by itself (bowl: any empty one; plate: '
               '1st front, 2nd back of the same Q3 / Q4), "basket Q3 6" / "basket Q1" = by hand: lift + carry + down into '
-              'the basket;  then "release" = let go -> hand open -> ascend + home.  '
+              'the basket (--teach, plate: stops above it, teach the insert with the pendant);  then "release" = let go -> hand '
+              'open -> ascend (taught: the records reversed) + home.  '
               'Enter = joints / temperature.', flush=True)
         while True:
             try:
@@ -471,7 +548,7 @@ def main():
                 pass
             try:                                                 # after a basket drop: back up and home with that plan
                 if BASKET and input('\n5. arm: ascend + home with the basket plan?  Enter = go, n = no: ').strip().lower() != 'n':
-                    mover(BASKET['plan'], 'ascend', VEL[0]) and mover(BASKET['plan'], 'to_home', VEL[0])
+                    mover(BASKET['plan'], BASKET.get('out_leg', 'ascend'), VEL[0]) and mover(BASKET['plan'], 'to_home', VEL[0])
             except EOFError:
                 pass
             g.system_stop()

@@ -50,7 +50,8 @@ class DockEnv:
                  grip_mm=15.0, tilt_deg=3.0, basket_xy_mm=10.0,
                  basket_yaw_deg=1.0, pitch_frac=0.05, lean_deg=3.0, descend_extra_mm=0.0,
                  residual_xy_mm=80.0, residual_pitch_deg=15.0, hover_until=None, hover_max=120, hover_step_mm=2.0,
-                 hover_tilt_deg=None):
+                 hover_tilt_deg=None, target_x_mm=0.0, lean_follow=0.0,
+                 depth_obs=False, freeze_in_tines=False):
         self.device = torch.device(device)
         self.n, self.path_steps, self.hover_steps = int(num_envs), int(steps), int(hover_steps)
         # (Claude 10/29 3rd review, opt-in) after the taught end keep going down 2 mm a step until floor contact,
@@ -60,6 +61,15 @@ class DockEnv:
         # observed error is below it (at most hover_max steps, x/y steps up to hover_step_mm while holding)
         self.hover_until, self.hover_max, self.hover_step = hover_until, int(hover_max), float(hover_step_mm) / 1000
         self.hover_tilt = None if hover_tilt_deg is None else float(hover_tilt_deg) / 20.0   # obs[2] units (20 deg)
+        # (Claude 10/29 Isaac oracle) the physical seat is ~+6 mm from the gap root in x (target_x_mm), and the last
+        # 10 cm go in better with x += lean_follow * sin(lean) * bottom height (physics: +1 713 vs -1 596 of 1024)
+        self.target_x, self.lean_follow = float(target_x_mm) / 1000, float(lean_follow)
+        # (Claude 10/29, opt-in) the side camera's DEPTH: a plane fit to the plate mask gives the plate pitch (2 deg noise)
+        # and its across-row offset (3 mm noise) instead of the mask PCA tilt (P with it ended 20 deg off the seat pitch)
+        self.depth_obs = bool(depth_obs)
+        # (opt-in) no correction once the plate bottom is below the tine tips: moving inside the tines drives the plate
+        # through them (physics replay lands it 2-6 gaps off)
+        self.freeze_in_tines = bool(freeze_in_tines)
         self.steps = self.path_steps + self.hover_steps + self.extra_steps + (self.hover_max if hover_until else 0)
         self.gen = torch.Generator(device=self.device).manual_seed(int(seed))
         J = np.load(job)
@@ -152,6 +162,11 @@ class DockEnv:
         P[:, :3, 3] += shift
         Ry = _axis_angle(self.Tbb[:, :3, 1], self.residual[:, 2])
         P[:, :3, :3] = Ry @ P[:, :3, :3]
+        if self.lean_follow:
+            bottom, _ = self._bottom(P)
+            h = ((self.Tbb[:, :3, :3].transpose(1, 2) @ (bottom - self.Tbb[:, :3, 3])[..., None]).squeeze(-1)[:, 2]
+                 - self.floor_z).clamp(0, 0.10)
+            P[:, :3, 3] += self.Tbb[:, :3, 0] * (self.lean_follow * math.sin(self.lean0) * h)[:, None]
         return P
 
     def _plate_pose(self):
@@ -176,7 +191,7 @@ class DockEnv:
         ids = torch.arange(self.n, device=self.device)
         gap_idx = self.job_gap[self.job]
         g = self.gaps[self.job, gap_idx]
-        root_x, yc = g[:, 0], g[:, 1]
+        root_x, yc = g[:, 0] + self.target_x, g[:, 1]
         # At the current rim height, leaning tine boundaries are between root and tip.
         Tbi_R = self.Tbb[:, :3, :3].transpose(1, 2)
         bottom_b = (Tbi_R @ (bottom - self.Tbb[:, :3, 3])[..., None]).squeeze(-1)
@@ -244,6 +259,12 @@ class DockEnv:
                            (major * across).sum(1))
         tilt += torch.randn(self.n, generator=self.gen, device=self.device) * math.radians(1.0)
         tilt_error = tilt - math.radians(-6.0)
+        if self.depth_obs:
+            n_b = (self.Tbb[:, :3, :3].transpose(1, 2) @ normal[..., None]).squeeze(-1)
+            n_b = n_b * torch.sign(n_b[:, 0:1])
+            pitch_err = torch.atan2(n_b[:, 2], n_b[:, 0]) - self.lean0
+            tilt_error = pitch_err + torch.randn(self.n, generator=self.gen, device=self.device) * math.radians(2.0)
+            err_across = ((bottom_b[:, 1] - yc) + torch.randn(self.n, generator=self.gen, device=self.device) * 0.003) / self.pitch0
         remaining = 1.0 - self.phase.float() / (self.steps - 1)
         low = (bottom_b[:, 2] - self.floor_z) / 0.15
         return torch.stack((err_along, err_across, tilt_error / math.radians(20), remaining, low,
@@ -262,6 +283,10 @@ class DockEnv:
             big = self.action_scale.clone()
             big[:2] = self.hover_step
             scale = torch.where(holding[:, None], big[None].expand_as(scale), scale)
+        if self.freeze_in_tines:
+            P0 = self._plate_pose(); b0, _ = self._bottom(P0)
+            h0 = (self.Tbb[:, :3, :3].transpose(1, 2) @ (b0 - self.Tbb[:, :3, 3])[..., None]).squeeze(-1)[:, 2] - self.floor_z
+            action = torch.where((h0 < self.tine_h)[:, None], torch.zeros_like(action), action)
         candidate = self.residual + action * scale
         candidate = torch.maximum(torch.minimum(candidate, self.residual_limit), -self.residual_limit)
         self.residual[active] = candidate[active]
@@ -299,7 +324,12 @@ class DockEnv:
     def _holding(self):
         """Hover above the slot: after the fixed hover, at the start of the taught insert part of the path (t at
         hover_at), while the last observed band error is above hover_until and the hover budget is left."""
-        at = self.t >= int(self.path_steps * 0.75)
+        if self.freeze_in_tines:                             # hold just above the tine tips, where moving is still free
+            P0 = self._plate_pose(); b0, _ = self._bottom(P0)
+            h0 = (self.Tbb[:, :3, :3].transpose(1, 2) @ (b0 - self.Tbb[:, :3, 3])[..., None]).squeeze(-1)[:, 2] - self.floor_z
+            at = (h0 >= self.tine_h) & (h0 < self.tine_h + 0.04)
+        else:
+            at = self.t >= int(self.path_steps * 0.75)
         off = self.last_err > self.hover_until
         if self.hover_tilt is not None:                       # (Claude 10/29) also the plate plane before entering the tines
             off |= self.last_tilt > self.hover_tilt

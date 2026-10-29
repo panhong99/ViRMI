@@ -59,7 +59,12 @@ def lowest(path):
                 for t in np.linspace(0, 2 * np.pi, 24, endpoint=False):
                     m = min(m, (c + 0.12 * (np.cos(t) * T[:3, 0] + np.sin(t) * T[:3, 1]))[2])
     return m
-legs = {f'{obj}_above': [home, above], f'{obj}_down': list(up[::-1]), f'{obj}_lift': list(up), f'{obj}_home': [above, home]}
+# (보스 10/29) home -> above -> down as ONE spline: 2 joint-line knots on the way over (the spline otherwise swings 5 cm
+# sideways into the descent) and a knot every 3 cm down; in the controller's spline model the hand stays within 1 mm
+# of the vertical below 5 cm (4 mm at 8 cm) and passes 'above' without stopping
+approach = [home + (above - home) * s for s in (1 / 3, 2 / 3)] + [above] + list(line(grasp, rise, n=5)[::-1][1:])
+legs = {f'{obj}_above': [home, above], f'{obj}_down': list(up[::-1]), f'{obj}_lift': list(up), f'{obj}_home': [above, home],
+        f'{obj}_approach': [home] + approach}
 for nm, path in legs.items():
     print(f'{nm}: lowest hand point z {lowest(np.array(path)):+.3f} m, max joint change {np.abs(np.array(path[-1]) - path[0]).max():.1f} deg')
 print('grasp flange', (Tg[:3, 3] * 1000).round(1), ' above flange', (k.fk(np.radians(above))[:3, 3] * 1000).round(1))

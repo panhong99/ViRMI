@@ -37,7 +37,7 @@ REPO = Path(__file__).resolve().parents[1]
 PLAN_PY = Path.home() / 'miniconda3/envs/foundationpose/bin/python'
 # arm legs (tesollo/arm_plan.py): (leg suffix, deg/s = deg/s^2), slow next to the object.  APPROACH runs before step 1
 # (hand in its approach pose: plate open = pose 0, bowl pose 30), HOME runs when 'home' is typed while holding
-ARM_APPROACH = ('above', 'down')
+ARM_APPROACH = ['approach']    # (보스 10/29) home -> above -> down as one spline (--approach_stop: 'above', 'down')
 ARM_HOME = ('lift', 'home')
 VEL = [60.0]                # arm deg/s = deg/s^2 for every leg (보스 10/29: sparse demo at 60; --vel)
 APPROACH_HAND = {'plate': 'open', 'bowl': 'bowl_grasp30'}
@@ -131,6 +131,7 @@ INSERT_VEL = [40.0]         # (보스 10/29) deg/s for the taught insert (1 cm o
 AUTO = [True]               # (보스 10/29) no Enter between the steps: seen -> approach -> grasp -> basket -> release -> home
 TAUGHT_IX = [None]          # (--taught [N], 보스 10/29) plate: basket = the taught insert N of taught_inserts.json
 TEACH = [False]             # (--teach, 보스 10/29) plate: the plan stops above the basket, the insert is taught by the pendant
+CONTACT = REPO / 'tesollo/grasp_contact.json'   # finger joints at the end of the last grasp per object (the pre-close target)
 TAUGHT = REPO / 'tesollo/taught_inserts.json'   # every taught insert: joints + basket pose + plate in the hand
 SEEN_PINS = {}              # quadrant -> pin of a plate seen standing there at the start (depth, empty_quadrant.py)
 SEEN = {}                   # quadrant -> 'bowl' / 'plate' / None, the fixed camera at the start of this run (empty_quadrant.py)
@@ -455,10 +456,17 @@ def main():
     p.add_argument('--new_demo', action='store_true', help='forget the bowls / plates put in the basket earlier today')
     p.add_argument('--leg_enter', action='store_true', help='(old) the mover asks "start" and Enter before every arm leg')
     p.add_argument('--vel', type=float, default=60.0, help='arm speed deg/s (= deg/s^2) for every arm leg (default 60)')
-    p.add_argument('--grasp_ms', type=int, default=1500, help='hand motion time while grasping [ms] (보스 10/29: 1500)')
+    p.add_argument('--grasp_ms', type=int, default=3000, help='hand motion time of the closing [ms] (보스 10/29: slower, like '
+                   'the release = 3000)')
+    p.add_argument('--preclose', type=float, default=0.7, help='(--object) the fingers close this fraction of the way to where '
+                   'they stopped on the last grasp (tesollo/grasp_contact.json) in one slow move, the force grasp does the rest '
+                   '(보스 10/29: ready -> grasp as one motion); 0 = pre-pose, then grasp')
+    p.add_argument('--smooth_grasp', action='store_true', help='(--object, untested) the SDK smooth-grasping flag on')
+    p.add_argument('--approach_stop', action='store_true', help='(old) the arm stops above the object before going down')
     p.add_argument('--motion_ms', type=int, default=3000, help='time per pose move [ms] (slow)')
     a = p.parse_args()
     VEL[0] = a.vel
+    ARM_APPROACH[:] = ['above', 'down'] if a.approach_stop else ARM_APPROACH
     TEACH[0] = a.teach
     INSERT_VEL[0] = a.insert_vel
     AUTO[0] = not (a.step or a.teach or a.hold or not a.object)
@@ -510,7 +518,7 @@ def main():
     mode = getattr(DGGraspMode, '_' + a.mode, None)
     hold, smooth = [1 if f + 1 in a.fixed else 0 for f in range(5) for _ in range(4)], 1
     if held is not None:
-        hold, smooth = [1 if j + 1 in held else 0 for j in range(JOINTS)], 0
+        hold, smooth = [1 if j + 1 in held else 0 for j in range(JOINTS)], int(a.smooth_grasp)
     if a.grasp_recipe is not None:
         r = dgm_recipe('grasps', a.grasp_recipe)
         mode, hold, smooth = DGGraspMode(r['graspMode']), [int(v) for v in r['positionMode'][:JOINTS]], r['smoothGrasping']
@@ -556,7 +564,7 @@ def main():
     g.on_connected(lambda: print('  -> connected', flush=True))
     g.on_disconnected(lambda: print('  -> disconnected', flush=True))
     check('connect', g.connect_to_gripper())
-    started = False
+    started, grasped = False, None
     try:
         check('option', g.set_gripper_option(GripperSetting.create(
             # (10/27 real) joint/finger count 20/5 -> SystemStart NOT_FOUND_MODEL; DGManager sends 0/0 and starts fine
@@ -589,18 +597,40 @@ def main():
             if (AUTO[0] or input('Enter = go, s = skip (arm already there): ').strip().lower() != 's') and \
                     not arm_legs(a.object, ARM_APPROACH):
                 raise KeyboardInterrupt
-        ask(f'1. move to "{a.pre}" in {a.motion_ms} ms.')
-        check('move', g.move_joint_all(pre))
-        time.sleep(a.motion_ms / 1000 + 0.5)
-        show()
-        ask(f'2. grasp {mode.name.lstrip("_")} at {a.force} N (joints {[j + 1 for j in range(JOINTS) if hold[j]]} hold position).')
-        check('position mode', g.set_position_mode_all(hold))
-        check('grasp data', g.set_grasp_data(mode, a.force, 0, smooth))
-        check(f'grasp motion time {a.grasp_ms} ms', g.set_motion_time_all_equal(a.grasp_ms))   # (보스 10/29 'too fast')
-        check('grasp', g.grasp(1))
-        time.sleep(max(2.0, a.grasp_ms / 1000 + 0.5))
+        contact = json.loads(CONTACT.read_text()).get(a.object) if a.object and CONTACT.exists() else None
+        if a.object and AUTO[0] and a.preclose > 0:
+            # (보스 10/29) ready + grasp as ONE motion: from where the hand is, the fingers go (slowly, --grasp_ms) toward
+            # where they stopped on the last grasp of this object, and the force grasp starts just before that move ends
+            close = list(pre)
+            if contact:
+                close = [p_ if hold[j] else p_ + a.preclose * (c - p_) for j, (p_, c) in enumerate(zip(pre, contact['joints']))]
+            ask(f'1+2. close to "{a.pre}"' + (f' + {a.preclose:.0%} of the way to the last grasp ({contact["time"]})' if contact
+                else ' (no last grasp yet)') + f' in {a.grasp_ms} ms, then grasp {mode.name.lstrip("_")} at {a.force} N '
+                f'(joints {[j + 1 for j in range(JOINTS) if hold[j]]} hold position).')
+            check('position mode', g.set_position_mode_all(hold))
+            check('grasp data', g.set_grasp_data(mode, a.force, 0, smooth))
+            check(f'motion time {a.grasp_ms} ms', g.set_motion_time_all_equal(a.grasp_ms))
+            check('close', g.move_joint_all(close))
+            time.sleep(max(0.0, a.grasp_ms / 1000 - 0.3))        # no stop between the two
+            check('grasp', g.grasp(1))
+            time.sleep(2.0)
+        else:
+            ask(f'1. move to "{a.pre}" in {a.motion_ms} ms.')
+            check('move', g.move_joint_all(pre))
+            time.sleep(a.motion_ms / 1000 + 0.5)
+            show()
+            ask(f'2. grasp {mode.name.lstrip("_")} at {a.force} N (joints {[j + 1 for j in range(JOINTS) if hold[j]]} hold position).')
+            check('position mode', g.set_position_mode_all(hold))
+            check('grasp data', g.set_grasp_data(mode, a.force, 0, smooth))
+            check(f'grasp motion time {a.grasp_ms} ms', g.set_motion_time_all_equal(a.grasp_ms))
+            check('grasp', g.grasp(1))
+            time.sleep(max(2.0, a.grasp_ms / 1000 + 0.5))
         check('motion time', g.set_motion_time_all_equal(a.motion_ms))
         show()
+        try:                                                   # where the fingers stopped: kept as the next pre-close
+            grasped = [float(v) for v in g.get_gripper_data().joint[:JOINTS]]   # target once this one reached the basket
+        except RuntimeError:
+            pass
         if a.lock:
             ask('2b. lock the grasping fingers at their current angles (position mode).')
             # target = the measured angles first, so the switch to position mode has nothing to move to
@@ -656,6 +686,13 @@ def main():
         print('\nstopped by 보스', flush=True)
     finally:
         if started:
+            if a.object and grasped and BASKET.get('down'):     # only a grasp that carried the object (a miss closes further)
+                try:
+                    d = json.loads(CONTACT.read_text()) if CONTACT.exists() else {}
+                    d[a.object] = dict(joints=grasped, time=time.strftime('%Y-%m-%d %H:%M:%S'))
+                    CONTACT.write_text(json.dumps(d, indent=1))
+                except (OSError, ValueError) as e:
+                    print(f'  (last grasp not saved: {e})', flush=True)
             check('release', g.grasp(0))
             time.sleep(1.0)
             try:

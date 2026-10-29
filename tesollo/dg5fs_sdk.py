@@ -39,7 +39,7 @@ PLAN_PY = Path.home() / 'miniconda3/envs/foundationpose/bin/python'
 # (hand in its approach pose: plate open = pose 0, bowl pose 30), HOME runs when 'home' is typed while holding
 ARM_APPROACH = ('above', 'down')
 ARM_HOME = ('lift', 'home')
-VEL = [80.0]                # arm deg/s = deg/s^2 for every leg (보스 10/27: 80 unless told otherwise; --vel)
+VEL = [60.0]                # arm deg/s = deg/s^2 for every leg (보스 10/29: sparse demo at 60; --vel)
 APPROACH_HAND = {'plate': 'open', 'bowl': 'bowl_grasp30'}
 BASKET_LEGS = ('lift', 'to_above', 'descend')     # fallback when lift + to_above cannot be merged into one spline
 DGM_CONFIG = Path.home() / '.config/DGManager/config.json'
@@ -219,7 +219,10 @@ def basket(obj, quadrant, pin, centre_h=None):
         return None
     BASKET['plan'], BASKET['target'] = m.group(1), (obj, quadrant, pin)
     BASKET.pop('out_leg', None)
-    print(f'   basket plan {m.group(1)} (after the release: ascend, to_home with run.sh mover)', flush=True)
+    planned_legs = json.loads(Path(BASKET['plan']).read_text()).get('legs', {})
+    if 'return_home' in planned_legs:
+        BASKET['out_leg'] = 'return_home'
+    print(f'   basket plan {m.group(1)} (after the release: vertical rise + home in one spline)', flush=True)
     BASKET['down'] = False
     mg = re.search(r'^merged: (\S+plan\.json)', out.stdout, re.M)
     # (보스 10/27, as the 2F-85 pipeline) grasp -> above the basket in ONE spline (lift + to_above), then the descent
@@ -400,7 +403,7 @@ def main():
                    'pendant, Enter records the joints (tesollo/taught_inserts.json); release, then back the same way + home')
     p.add_argument('--new_demo', action='store_true', help='forget the bowls / plates put in the basket earlier today')
     p.add_argument('--leg_enter', action='store_true', help='(old) the mover asks "start" and Enter before every arm leg')
-    p.add_argument('--vel', type=float, default=80.0, help='arm speed deg/s (= deg/s^2) for every arm leg (default 80)')
+    p.add_argument('--vel', type=float, default=60.0, help='arm speed deg/s (= deg/s^2) for every arm leg (default 60)')
     p.add_argument('--motion_ms', type=int, default=3000, help='time per pose move [ms] (slow)')
     a = p.parse_args()
     VEL[0] = a.vel
@@ -587,7 +590,10 @@ def main():
                 pass
             try:                                                 # after a basket drop: back up and home with that plan
                 if BASKET and input('\n5. arm: ascend + home with the basket plan?  Enter = go, n = no: ').strip().lower() != 'n':
-                    mover(BASKET['plan'], BASKET.get('out_leg', 'ascend'), VEL[0]) and mover(BASKET['plan'], 'to_home', VEL[0])
+                    out_leg = BASKET.get('out_leg', 'ascend')
+                    moved = mover(BASKET['plan'], out_leg, VEL[0])
+                    if moved and out_leg != 'return_home':
+                        mover(BASKET['plan'], 'to_home', VEL[0])
             except EOFError:
                 pass
             g.system_stop()

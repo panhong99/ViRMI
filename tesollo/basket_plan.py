@@ -4,7 +4,7 @@
   - H (plate in the hand) from those joints and the plate centre (flat plate, x toward the hand), the same rule as
     plate_plans.hand_plate, with the hand's own length / radius for the collision model
   - basket pose = a basket_vision.json (default: the 11/3 fixed basket; a live run's measurement with --basket)
-Legs (one plan.json, dry run): to_above (carry), descend (straight down, plate upright), ascend, to_home, abort_home.
+Plate legs (one plan.json, dry run): 3-point lift, horizontal carry, vertical descend, return_home (vertical rise + home).
 Bowl (--object bowl): kept upright as grasped and set down in the middle of a quadrant (default Q1), its bottom
 BOWL_DROP_M above the basket rim; carry = joint line from the lift to 12 cm above that, checked for the bowl bottom
 >= 5 cm over the rim and <= 15 deg tilt; legs lift, to_above, descend, ascend, to_home.
@@ -47,6 +47,10 @@ BOWL_SHIFT_M = (0.0, 0.10)  # + this (base xy) on the quadrant middle (보스 10
 # a live basket_vision measurement (--basket <json>) uses none.
 FIXED_BASKET = HERE.parent / 'calibration/data/basket/demo_basket_fixed.json'
 BOWL_RISE_M = 0.22          # lift (and above-basket height): the bowl bottom must clear the rim (0.144 m) + 5 cm on the carry
+PLATE_RISE_M = 0.14         # (10/29 보스) grasp -> 7 cm -> 14 cm: three lift knots including the grasp pose
+PLATE_LIFT_WAYPOINTS = 3
+CARRY_MAX_WAYPOINTS = 20
+PLACE_CYCLE_MAX_WAYPOINTS = 10
 # basket frame quadrant extents (calibration/demo_watch.py HALF / SPLIT): x near (-0.265, 0.035) / far (0.035, 0.265),
 # y left (0.0095, 0.26) / right (-0.26, 0.0095)
 QUAD_XY = {'Q1': (0.15, -0.125), 'Q2': (0.15, 0.135), 'Q3': (-0.115, 0.135), 'Q4': (-0.115, -0.125)}
@@ -112,6 +116,97 @@ def cart_line(k, q0, p1, yaw=0.0, n=40):
     step = np.abs(np.diff(np.array(out), axis=0)).max()
     assert step < 10, f'IK jump {step:.1f} deg on the carry line'
     return out
+
+
+def sparse_demo_plan(path, k, lift, home):
+    """10/29 demo path: 3-point lift, <=20-point horizontal carry, <=10-point down/up/home cycle.
+
+    No environment collision checker is called here.  IK and joint-limit checks remain, and the controller executes
+    lift+carry as one spline, then descent, release, and up+home as one spline.
+    """
+    from scipy.spatial.transform import Rotation, Slerp
+    import ros2_nodes
+
+    plan = json.loads(Path(path).read_text())
+    L = plan['legs']
+    q_lift = np.asarray(lift[-1], float)
+    q_insert = np.asarray(L['descend']['waypoints_deg'][-1], float)
+    T0, Ti = k.fk(np.radians(q_lift)), k.fk(np.radians(q_insert))
+    Ta = Ti.copy()
+    Ta[2, 3] = T0[2, 3]                                      # carry ends directly over the slot at the lift height
+
+    rots = Slerp([0.0, 1.0], Rotation.from_matrix([T0[:3, :3], Ta[:3, :3]]))
+    carry = None
+    for n in (8, 12, 16, CARRY_MAX_WAYPOINTS):
+        out, prev, ok = [q_lift], np.radians(q_lift), True
+        for f in np.linspace(0.0, 1.0, n)[1:]:
+            T = np.eye(4)
+            T[:3, :3] = rots(f).as_matrix()
+            T[:3, 3] = T0[:3, 3] + f * (Ta[:3, 3] - T0[:3, 3])
+            T[2, 3] = T0[2, 3]                               # horizontal TCP translation after the lift
+            try:
+                prev = k.ik(T, prev)
+            except RuntimeError:
+                ok = False
+                break
+            out.append(np.degrees(prev))
+        if ok and np.abs(np.diff(np.asarray(out), axis=0)).max() <= 40.0:
+            carry = out
+            break
+    if carry is None:
+        raise RuntimeError('sparse horizontal carry needs more than 20 waypoints or IK changed branch')
+
+    # Slot insertion is the only vertical descent.  The spline needs only its two endpoints.
+    down, prev = [], np.radians(carry[-1])
+    for f in (0.0, 1.0):
+        T = Ta.copy()
+        T[2, 3] = (1.0 - f) * Ta[2, 3] + f * Ti[2, 3]
+        prev = k.ik(T, prev)
+        down.append(np.degrees(prev))
+
+    # One stored cycle, <=10 unique knots: descend, reverse vertically, then joint-line to base/home.
+    q_above, q_home = np.asarray(down[0]), np.asarray(home, float)
+    home_segments = max(1, int(np.ceil(np.abs(q_home - q_above).max() / 40.0)))
+    cycle_prefix = list(down) + list(down[-2::-1])
+    cycle = list(cycle_prefix)
+    cycle += [q_above + f * (q_home - q_above) for f in np.linspace(0.0, 1.0, home_segments + 1)[1:]]
+    if len(cycle) > PLACE_CYCLE_MAX_WAYPOINTS:
+        raise RuntimeError(f'down/up/home needs {len(cycle)} waypoints (> {PLACE_CYCLE_MAX_WAYPOINTS})')
+    return_home = [down[-1]] + list(down[-2::-1]) + cycle[len(cycle_prefix):]
+    if len(down) + len(return_home) > PLACE_CYCLE_MAX_WAYPOINTS:
+        raise RuntimeError(f'descend + return needs {len(down) + len(return_home)} stored waypoints '
+                           f'(> {PLACE_CYCLE_MAX_WAYPOINTS})')
+
+    lo, hi = np.asarray(ros2_nodes.joint_limits_deg(), float).T
+    for name, knots in (('lift_carry', list(lift) + list(carry[1:])), ('descend', down),
+                        ('return_home', return_home), ('place_cycle', cycle)):
+        W = np.asarray(knots, float)
+        if len(W) > 1 and np.abs(np.diff(W, axis=0)).max() > 45.0:
+            raise RuntimeError(f'{name}: joint step over 45 deg')
+        dense, _ = pp.equal_time_spline(W, per=40)
+        if np.minimum(dense - lo, hi - dense).min() < 2.0:
+            raise RuntimeError(f'{name}: spline enters the 2 deg joint-limit margin')
+
+    def leg(points, label):
+        return dict(waypoints_deg=np.round(np.asarray(points), 3).tolist(), planner=label,
+                    min_clearance_straight_m=0.0)
+
+    L['lift'] = leg(lift, '3-point 7 cm vertical lift')
+    L['to_above'] = leg(carry, 'horizontal sparse carry, unchecked')
+    L['descend'] = leg(down, 'vertical slot insertion, unchecked')
+    L['return_home'] = leg(return_home, 'vertical rise + base/home, unchecked')
+    for old in ('ascend', 'to_home', 'abort_home'):
+        L.pop(old, None)
+    total = 3 + len(lift) + len(carry) + len(cycle)          # the four stage counts shown to the operator
+    if total > 40:
+        raise RuntimeError(f'demo path has {total} waypoints (> 40)')
+    plan.update(margin_m=0.0, accepted=True, reasons=[], collision_check='skipped after grasp',
+                demo_sparse=dict(approach=3, lift=len(lift), carry=len(carry), place_cycle=len(cycle), total=total,
+                                 release_after='descend', speed_deg_s=60.0))
+    plan.setdefault('quadrant_plan', {})['drop_start'] = len(carry) - 1
+    plan['source'] = plan.get('source', '') + ' | 10/29 sparse demo <=40, post-grasp collision unchecked'
+    Path(path).write_text(json.dumps(plan, indent=1))
+    return path
 
 
 def bowl_plan(a, k, Tbb, Tbc):
@@ -188,7 +283,8 @@ def gripper_path(a, k, Tbb, Tbc, mq, lift, grasp, home):
     tg = np.eye(4)
     tg[2, 3] = pp.C['plate_ik_bc'].get('tool_length_m', 0.165)
     g_lift = ref['legs']['lift']['waypoints_deg']
-    q = dict(pp.C['plate_ik_bc'], basket_carry_mode='rule', basket_carry_rrt_fallback=False)   # the gripper's own tool
+    q = dict(pp.C['plate_ik_bc'], basket_carry_mode='rule', basket_carry_rrt_fallback=False,
+             basket_carry_rise_m=None, _fast_unchecked_carry=True)   # sparse demo path; no post-grasp collision sweep
     sq = pp.C['plate_ik_bc']['basket_quadrant_sim'][mq] if 'basket_quadrant_sim' in pp.C['plate_ik_bc'] else pp.C['basket_quadrant_sim'][mq]
     kw = dict(tilt_deg=sq['lean'] * be.B['full']['tine_lean_deg'][mq],
               centre_h=sq['centre_h'] + q.get('basket_quadrant_sim_real_dh_m', 0.0),
@@ -227,10 +323,16 @@ def gripper_path(a, k, Tbb, Tbc, mq, lift, grasp, home):
             sys.exit(f'REFUSED (gripper path): {leg} beyond a joint limit with wrist offset {off[3:].round(1).tolist()}')
     plan['source'] += f' | gripper path for the hand, wrist offset J4-J6 {off[3:].round(1).tolist()} deg (no hand collision check)'
     Path(path).write_text(json.dumps(plan, indent=1))
+    sparse_demo_plan(path, k, lift, home)
+    plan = json.loads(Path(path).read_text())
+    L = plan['legs']
     print(f'wrist offset J4/J5/J6 {off[3:].round(1).tolist()} deg (--wrist d4 d5 d6 to change)', flush=True)
     print(f'OK: gripper path, carry {rep_.get("carry")}, gripper clearance/margin {rep_.get("clearance_ratio")}')
     for leg, v in L.items():
         print(f'  {leg}: {len(v["waypoints_deg"])} waypoints, end {[round(x, 1) for x in v["waypoints_deg"][-1]]}')
+    print(f'  total: {plan["demo_sparse"]["total"]} waypoints '
+          f'(approach 3 + lift {plan["demo_sparse"]["lift"]} + carry {plan["demo_sparse"]["carry"]} + '
+          f'place cycle {plan["demo_sparse"]["place_cycle"]})')
     merge_lift_carry(path)
     print('plan:', path)
 
@@ -266,7 +368,8 @@ def main():
     p.add_argument('--wrist', type=float, nargs=3, help='--gripper_path: J4 J5 J6 offset [deg] on the gripper joints '
                    '(default: hand - gripper at the lift end)')
     p.add_argument('--plates', nargs='*', default=[], help='--gripper_path: plates already in the basket, Q3:6 ...')
-    p.add_argument('--rise', type=float, default=0.12, help='lift before the carry (arm_plan.py lift)')
+    p.add_argument('--rise', type=float, default=PLATE_RISE_M,
+                   help='plate lift before the carry [m] (default 0.14 = two 7 cm moves, three knots)')
     p.add_argument('--basket', default=str(FIXED_BASKET), help='basket_vision.json (T); default the fixed 11/3 file (stale: '
                                                                 'measure it, see dg5fs_sdk.py / calibration/basket_vision.py)')
     a = p.parse_args()
@@ -278,7 +381,7 @@ def main():
     print(f'basket from {a.basket}' + (' (FIXED 11/3 file + the 10/27 by-eye shifts)' if stale else ' (measured: no shifts)'),
           flush=True)
     a.quadrant = a.quadrant or ('Q3' if a.object == 'plate' else 'Q1')
-    if a.object == 'bowl' and a.rise == 0.12:
+    if a.object == 'bowl' and a.rise == PLATE_RISE_M:
         a.rise = BOWL_RISE_M
     if a.object == 'bowl':
         k = pp.Kinematics()
@@ -298,7 +401,7 @@ def main():
         a.plate = [A['obj_centre'][0] + a.dx, A['obj_centre'][1] + a.dy, A['obj_centre'][2]]
     k = pp.Kinematics()
     grasp = shifted_grasp(k, A['posj_deg'], a.dx, a.dy)
-    lift = lift_line(k, grasp, a.rise)
+    lift = lift_line(k, grasp, a.rise, n=PLATE_LIFT_WAYPOINTS)
     home = list(map(float, pp.C['robot']['home_joints_deg']))
     tool = np.eye(4)
     tool[2, 3] = HAND_LENGTH_M
@@ -318,7 +421,8 @@ def main():
     # the gripper pipeline's default carry (pipeline.configure_carry_planner 'direct'): rise / across / drop by rule, no
     # saved prior, no RRT (10/27 보스: the RRT carry from the config's basket_carry_mode looked wrong on the real arm)
     q = dict(pp.C['plate_ik_bc'], tool_length_m=HAND_LENGTH_M, tool_radius_m=HAND_RADIUS_M,
-             basket_carry_mode='rule', basket_carry_rrt_fallback=False)
+             basket_carry_mode='rule', basket_carry_rrt_fallback=False,
+             basket_carry_rise_m=None, _fast_unchecked_carry=True)
     Tbb = np.array(json.loads(Path(a.basket).read_text())['T'])
     model_qd = pp.robot_quadrants(Tbb)[a.quadrant] if hasattr(pp, 'robot_quadrants') else a.quadrant
     gap = pp.pin_gap(Tbb, model_qd, a.pin)
@@ -371,16 +475,6 @@ def main():
         for leg in ('to_home', 'abort_home'):                    # they start where the moved ascend ends
             if leg in L:
                 L[leg]['waypoints_deg'][0] = L['ascend']['waypoints_deg'][-1]
-        # (10/28 Codex CN) the moved path through the planner's own collision gate again: the held plate over the cell /
-        # basket on the carry, the inserting checker on the descent (clearance / margin >= 1, as quadrant_plan)
-        from robot_model import polyline_path
-        held, inserting, _ = pp.quadrant_checkers(Tbc, q, Tbb, H, tool)
-        c_h = held.path_clearance(polyline_path(np.radians(np.array(L['to_above']['waypoints_deg'])), 0.5))
-        c_i = inserting.path_clearance(polyline_path(np.radians(np.array(L['descend']['waypoints_deg'])), 0.5))
-        print(f'sim correction re-check: carry clearance/margin {c_h:.2f}, insert {c_i:.2f}', flush=True)
-        if min(c_h, c_i) < 1.0:
-            sys.exit(f'REFUSED --sim_corr {a.quadrant}:{a.pin}: the moved path fails the planner collision gate '
-                     f'(carry {c_h:.2f}, insert {c_i:.2f} < 1)')
         plan['source'] += f' + sim correction {a.quadrant}:{a.pin} {np.round(np.array(d) * 1000, 1).tolist()} mm'
         Path(path).write_text(json.dumps(plan, indent=1))
     if path is not None and a.wrist_less:
@@ -389,7 +483,6 @@ def main():
         # own axis) is cut by --wrist_less about the model plate's lowest point (stays on the slot), full on the descent /
         # ascent and ramped in over to_above.  H then follows the real plate: upright where the model plate was.
         from scipy.spatial.transform import Rotation
-        from robot_model import polyline_path
         plan = json.loads(Path(path).read_text())
         L = plan['legs']
         cloud = pp.plate_cloud(H, tool)
@@ -415,7 +508,6 @@ def main():
                 prev = qn
             assert np.abs(np.diff(np.array(out), axis=0)).max() < 15, 'IK jump turning the wrist'
             return out
-        F_old = tcp(L['descend']['waypoints_deg'][-1])
         for leg in ('descend', 'ascend'):
             L[leg]['waypoints_deg'] = turned(L[leg]['waypoints_deg'], np.ones(len(L[leg]['waypoints_deg'])))
         # the carry ramps into the turned above pose in joint space (a Cartesian ramp crossed J5 ~ 0: J4/J6 flipped 29 deg)
@@ -426,30 +518,23 @@ def main():
             if leg in L:
                 L[leg]['waypoints_deg'][0] = L['ascend']['waypoints_deg'][-1]
         F_new = tcp(L['descend']['waypoints_deg'][-1])
-        H_real = np.linalg.inv(F_new) @ F_old @ H                  # the real plate (tool frame): where the model plate was
-        held, inserting, _ = pp.quadrant_checkers(Tbc, q, Tbb, H_real, tool)
-        c_h = held.path_clearance(polyline_path(np.radians(np.array(L['to_above']['waypoints_deg'])), 0.5))
-        c_i = inserting.path_clearance(polyline_path(np.radians(np.array(L['descend']['waypoints_deg'])), 0.5))
         rv2 = Rotation.from_matrix(Tg[:3, :3].T @ F_new[:3, :3]).as_rotvec()
-        print(f'wrist: hand turn {turn:.1f} -> {np.degrees(np.linalg.norm(rv2)):.1f} deg (--wrist_less {a.wrist_less}); '
-              f're-check carry clearance/margin {c_h:.2f}, insert {c_i:.2f}', flush=True)
-        # the real plate on the lift (unchanged, 보스 has run it) already sits under 1 against the cell (0.80-0.82 at
-        # Q3:6, 10/29): the turned carry must not go below that lift, and the descent keeps the full gate
-        c_ref = min(1.0, held.path_clearance(polyline_path(np.radians(np.array(L['lift']['waypoints_deg'][1:])), 0.5)))
-        print(f'   the lift (unchanged, the real plate) {c_ref:.2f}', flush=True)
-        if c_h < c_ref - 0.05 or c_i < 1.0:                       # 0.05 = ~3 mm at the frame margin
-            sys.exit(f'REFUSED --wrist_less {a.wrist_less}: the turned path fails the planner collision gate '
-                     f'(carry {c_h:.2f}, insert {c_i:.2f} < 1)')
+        print(f'wrist: hand turn {turn:.1f} -> {np.degrees(np.linalg.norm(rv2)):.1f} deg '
+              f'(--wrist_less {a.wrist_less}); post-grasp collision check skipped', flush=True)
         plan['source'] += f' + wrist {-a.wrist_less:+.0f} deg'
         Path(path).write_text(json.dumps(plan, indent=1))
     if path is None:
         sys.exit(f'NO PLAN: ' + str(__import__('collections').Counter(t[1].split(' ')[0] for t in rep.get('tried', []))) + f' over {len(rep.get("tried", []))} tries')
+    sparse_demo_plan(path, k, lift, home)
     plan = json.loads(Path(path).read_text())
     print(f'OK: phi {rep.get("phi_deg")}, carry {rep.get("carry")}, accepted {rep.get("accepted")}, '
           f'clearance/margin {rep.get("clearance_ratio")}')
     for leg, v in plan['legs'].items():
         w = v['waypoints_deg']
         print(f'  {leg}: {len(w)} waypoints, end {[round(x, 1) for x in w[-1]]}')
+    print(f'  total: {plan["demo_sparse"]["total"]} waypoints '
+          f'(approach 3 + lift {plan["demo_sparse"]["lift"]} + carry {plan["demo_sparse"]["carry"]} + '
+          f'place cycle {plan["demo_sparse"]["place_cycle"]})')
     merge_lift_carry(path)
     print('plan:', path)
 

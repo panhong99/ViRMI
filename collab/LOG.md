@@ -5567,3 +5567,10 @@ plate 삽입 +y 5 cm, 손목 회전 30–45° 이내, 오늘 밤 sim에서 핸�
 ~/miniconda3/envs/foundationpose/bin/python ~/pan/6D_pose/tesollo/measure_held.py
 # 2) 그 뒤 holding> 에서 basket Q3 6 (측정된 손 안 자세로 자동 계획)
 ```
+
+## 2026-10-29 오전 (Claude) — 바구니 위치 의존성 제거 확인
+- Tesollo 경로는 그동안 고정 파일 `demo_basket_fixed.json`(11/3 시연용)을 썼다. 오늘 마커 없이 실측(basket_vision, 고정 D455): 바구니가 그 파일보다 x −37 mm, **y +109 mm**, yaw −0.9° → 10/27 실기에서 눈으로 넣은 +y 10 cm(bowl)·+5 cm(plate) 보정의 원인. 손 문제가 아니었다.
+- 수정(1f5fa6c): `dg5fs_sdk.py --object ...`가 시작할 때 바구니를 실측(팔 홈, `--majority 4`: 5장 중 1장이 손잡이 180° 반대로 뽑히는 경우 다수결)하고 모든 바구니 계획에 그 값을 씀. 10/27 눈 보정은 고정 파일을 쓸 때만 적용.
+- 실측 반복: 5장 간 0.3–0.9 mm. 단 4회 연속 5장 중 1장이 180° 뒤집힘(→ 다수결로 해결, 4/5 미만이면 거부).
+- 위치 의존성 시험(오프라인): 실측 바구니 ±5 cm(x, y), ±8° 회전 7가지 모두 plate Q3 핀 6 · bowl Q3 계획 승인.
+- Codex CP(관객 GUI, YOLOE 최대 fps) 작업판에 올림.

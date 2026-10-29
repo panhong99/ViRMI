@@ -1,0 +1,33 @@
+{
+ "ok": true,
+ "why": "",
+ "T": [
+  [
+   0.9998449740447143,
+   -0.017607608512363513,
+   0.0,
+   0.9713502199263152
+  ],
+  [
+   0.017607608512363513,
+   0.9998449740447143,
+   0.0,
+   -0.1673980840589634
+  ],
+  [
+   0.0,
+   0.0,
+   1.0,
+   0.144
+  ],
+  [
+   0.0,
+   0.0,
+   0.0,
+   1.0
+  ]
+ ],
+ "spread_mm": 0.0,
+ "spread_deg": 0.0,
+ "source": "\ubcf4\uc2a4 10/29 safe demo: the basket stays put - its pose at the insert teaching (2026-10-29 11:17, taught_inserts.json #0); 14 measurements 15:03-16:14 were within 6 mm / 0.7 deg of it (median 0.7 mm / 0.07 deg)"
+}

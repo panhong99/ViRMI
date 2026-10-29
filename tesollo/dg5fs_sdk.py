@@ -511,6 +511,8 @@ def main():
     held = None
     if a.basket_json:
         BASKET_JSON[0] = str(Path(a.basket_json).resolve())
+        if a.object and not a.no_view:                  # (보스 10/29 safe demo: fixed basket) the view all the same
+            start_view()
     elif a.object and not a.fixed_basket:
         # (보스 10/29: the start was slow - four YOLOE loads one after another) the view first (it owns the camera, the
         # basket file it draws is written by the measurement below from its shared frames), then the quadrants and the

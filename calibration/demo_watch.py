@@ -240,6 +240,16 @@ def write_state(path, state):
     os.replace(tmp, path)
 
 
+def write_rgbd_share(path, frame, timestamp=None):
+    """Atomically publish one fixed-camera RGB-D frame for the other perception tools."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    timestamp = time.time() if timestamp is None else float(timestamp)
+    tmp = path.with_name(path.stem + '.tmp.npz')
+    np.savez(tmp, rgb=frame.rgb, depth=frame.depth, K=frame.K, t=timestamp)
+    os.replace(tmp, path)
+
+
 def detect_live(a):
     """(10/26 보스: YOLOE만 띄워서 검출 확인) boxes + masks only, camera opened here (nothing else may hold it) at its
     own rate, or the perception share.  Prompts / conf from the command line; fps and YOLOE ms in the terminal."""
@@ -265,6 +275,8 @@ def detect_live(a):
             if cam is not None:
                 fr = cam.read()
                 rgb, K = fr.rgb, np.asarray(fr.K, float)
+                if a.write_share:
+                    write_rgbd_share(a.share, fr)
             else:
                 try:
                     z = np.load(a.share)
@@ -322,6 +334,9 @@ def main():
     a.add_argument('--png', help='offline: save the overlay here')
     a.add_argument('--detect_only', action='store_true', help='(10/26) YOLOE boxes only (no basket, quadrants, state); q quits')
     a.add_argument('--camera', help="--detect_only: open this D455 here ('fixed' = the config's fixed camera) instead of the share")
+    a.add_argument('--write_share', action='store_true',
+                   help='--detect_only --camera: atomically publish every camera frame to --share '
+                        '(rgb/depth metres/K/t) for the other perception tools')
     a.add_argument('--prompts', nargs='+', default=PROMPTS, help='--detect_only: YOLOE prompts')
     a.add_argument('--conf', type=float, default=0.15, help='--detect_only: YOLOE confidence threshold')
     a.add_argument('--imgsz', type=int, default=None, help='YOLOE inference size (audience: 512, otherwise: 640)')

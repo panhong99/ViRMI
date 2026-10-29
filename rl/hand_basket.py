@@ -42,6 +42,10 @@ def parse():
     p.add_argument('--tilt_deg', type=float, default=3.0, help='+- unknown small in-hand tilt [deg]')
     p.add_argument('--corr', default='', help='eval: json {pin: [dx, dy, dz]} [m] (a cem result)')
     p.add_argument('--speed', type=float, default=0.10, help='descent speed of the plate [m/s]')
+    p.add_argument('--compliant', action='store_true', help='(Claude 10/29, opt-in) drive the plate toward the path pose '
+                   'with velocities (contacts resolved) instead of writing the pose every step (the dish is 2.5 cm deep: '
+                   'a forced pose runs it through the tines and the release depenetration decides the result)')
+    p.add_argument('--compliant_tau', type=float, default=0.05, help='--compliant: time constant [s]')
     p.add_argument('--settle_s', type=float, default=2.0)
     p.add_argument('--out', default='')
     p.add_argument('--seed', type=int, default=0)
@@ -239,8 +243,24 @@ def main():
         for t in range(n_move + 30):
             i = torch.clamp((torch.tensor(t * a.speed * dt, device=dev) / torch.tensor(step[job_of], device=dev)).long(),
                             max=lens - 1)
-            plate.write_root_pose_to_sim(poses_t[torch.arange(N, device=dev), i])
-            plate.write_root_velocity_to_sim(zero)
+            tgt = poses_t[torch.arange(N, device=dev), i]
+            if not a.compliant or t == 0:
+                plate.write_root_pose_to_sim(tgt)
+                plate.write_root_velocity_to_sim(zero)
+            else:
+                cur_p, cur_q = plate.data.root_pos_w, plate.data.root_quat_w          # wxyz
+                v = ((tgt[:, :3] - cur_p) / a.compliant_tau).clamp(-0.5, 0.5)
+                qt, qc = tgt[:, 3:], cur_q
+                qc_conj = qc * torch.tensor([1.0, -1.0, -1.0, -1.0], device=dev)
+                w1, x1, y1, z1 = qt.unbind(1)
+                w2, x2, y2, z2 = qc_conj.unbind(1)
+                qe = torch.stack((w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2, w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+                                  w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2, w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2), 1)
+                qe = qe * torch.where(qe[:, :1] < 0, -1.0, 1.0)
+                vn = torch.linalg.vector_norm(qe[:, 1:], dim=1, keepdim=True).clamp_min(1e-9)
+                rotvec = 2 * torch.atan2(vn, qe[:, :1]) * qe[:, 1:] / vn
+                wv = (rotvec / a.compliant_tau).clamp(-3.0, 3.0)
+                plate.write_root_velocity_to_sim(torch.cat((v, wv), 1))
             if a.hand:
                 q = robot.data.default_joint_pos.clone()
                 q[:, arm_ids] = q_path_t[torch.arange(N, device=dev), i]

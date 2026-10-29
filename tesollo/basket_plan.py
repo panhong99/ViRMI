@@ -50,7 +50,7 @@ BOWL_RISE_M = 0.22          # lift (and above-basket height): the bowl bottom mu
 PLATE_RISE_M = 0.14         # (10/29 보스) grasp -> 7 cm -> 14 cm: three lift knots including the grasp pose
 PLATE_LIFT_WAYPOINTS = 3
 CARRY_MAX_WAYPOINTS = 20
-PLACE_CYCLE_MAX_WAYPOINTS = 10
+PLACE_CYCLE_MAX_WAYPOINTS = 20   # (10/29 Claude: was 10; the descent now has a knot every 5 cm)
 # basket frame quadrant extents (calibration/demo_watch.py HALF / SPLIT): x near (-0.265, 0.035) / far (0.035, 0.265),
 # y left (0.0095, 0.26) / right (-0.26, 0.0095)
 QUAD_XY = {'Q1': (0.15, -0.125), 'Q2': (0.15, 0.135), 'Q3': (-0.115, 0.135), 'Q4': (-0.115, -0.125)}
@@ -118,7 +118,10 @@ def cart_line(k, q0, p1, yaw=0.0, n=40):
     return out
 
 
-def sparse_demo_plan(path, k, lift, home):
+PLATE_OVER_RIM_M = 0.05     # (보스 10/29, the sparse carry hit the basket) held plate's lowest point over the basket rim
+
+
+def sparse_demo_plan(path, k, lift, home, tool_m=HAND_LENGTH_M):
     """10/29 demo path: 3-point lift, <=20-point horizontal carry, <=10-point down/up/home cycle.
 
     No environment collision checker is called here.  IK and joint-limit checks remain, and the controller executes
@@ -132,33 +135,63 @@ def sparse_demo_plan(path, k, lift, home):
     q_lift = np.asarray(lift[-1], float)
     q_insert = np.asarray(L['descend']['waypoints_deg'][-1], float)
     T0, Ti = k.fk(np.radians(q_lift)), k.fk(np.radians(q_insert))
-    Ta = Ti.copy()
-    Ta[2, 3] = T0[2, 3]                                      # carry ends directly over the slot at the lift height
+    # (Claude 10/29, after the real run hit the basket) the carry ran at the lift height while the hand turned the plate
+    # upright: its lowest point went 12-19 cm under the rim.  The carry height is now where the held plate (plan
+    # plate_in_tcp, flange frame) stays PLATE_OVER_RIM_M over the rim inside the basket (+5 cm around its walls) along
+    # the whole turn, checked on the controller spline itself; up there straight, across, then the straight descent.
+    tool = np.eye(4)
+    tool[2, 3] = tool_m
+    cloud = pp.plate_cloud(np.asarray(plan['plate_in_tcp'], float), tool)
+    Tbi = np.linalg.inv(np.asarray(plan['basket_T'], float))
 
-    rots = Slerp([0.0, 1.0], Rotation.from_matrix([T0[:3, :3], Ta[:3, :3]]))
+    def over_rim(F):                                         # plate's lowest point over/near the basket, basket frame
+        B = (cloud @ F[:3, :3].T + F[:3, 3]) @ Tbi[:3, :3].T + Tbi[:3, 3]
+        near = (np.abs(B[:, 0]) < 0.35) & (np.abs(B[:, 1]) < 0.34)
+        return float(B[near, 2].min()) if near.any() else np.inf
+
+    rots = Slerp([0.0, 1.0], Rotation.from_matrix([T0[:3, :3], Ti[:3, :3]]))
+
+    def pose(f, z):
+        T = np.eye(4)
+        T[:3, :3] = rots(f).as_matrix()
+        T[:3, 3] = T0[:3, 3] + f * (Ti[:3, 3] - T0[:3, 3])
+        T[2, 3] = z
+        return T
+
+    z_c = max(T0[2, 3], Ti[2, 3])
+    for _ in range(8):
+        worst = min(over_rim(pose(f, z_c)) for f in np.linspace(0, 1, 41))
+        if worst >= PLATE_OVER_RIM_M:
+            break
+        z_c += PLATE_OVER_RIM_M - worst + 0.005
     carry = None
-    for n in (8, 12, 16, CARRY_MAX_WAYPOINTS):
+    for n in (6, 8, 12, 16, CARRY_MAX_WAYPOINTS):
+        Tup = T0.copy()
+        Tup[2, 3] = z_c
         out, prev, ok = [q_lift], np.radians(q_lift), True
-        for f in np.linspace(0.0, 1.0, n)[1:]:
-            T = np.eye(4)
-            T[:3, :3] = rots(f).as_matrix()
-            T[:3, 3] = T0[:3, 3] + f * (Ta[:3, 3] - T0[:3, 3])
-            T[2, 3] = T0[2, 3]                               # horizontal TCP translation after the lift
+        for T in ([Tup] if z_c > T0[2, 3] + 0.01 else []) + [pose(f, z_c) for f in np.linspace(0.0, 1.0, n)[1:]]:
             try:
                 prev = k.ik(T, prev)
             except RuntimeError:
                 ok = False
                 break
             out.append(np.degrees(prev))
-        if ok and np.abs(np.diff(np.asarray(out), axis=0)).max() <= 40.0:
+        if not ok or np.abs(np.diff(np.asarray(out), axis=0)).max() > 40.0:
+            continue
+        dense, _ = pp.equal_time_spline(np.asarray(list(lift) + out[1:], float), per=24)
+        spl = min(over_rim(k.fk(np.radians(q))) for q in dense)
+        if spl >= PLATE_OVER_RIM_M - 0.01:                   # the spline between the knots too (1 cm tolerance)
             carry = out
             break
     if carry is None:
-        raise RuntimeError('sparse horizontal carry needs more than 20 waypoints or IK changed branch')
+        raise RuntimeError(f'sparse carry: no <= {CARRY_MAX_WAYPOINTS}-knot carry keeps the plate '
+                           f'{PLATE_OVER_RIM_M * 100:.0f} cm over the rim (carry height {z_c:.3f} m)')
+    Ta = pose(1.0, z_c)                                       # over the slot at the carry height
 
     # Slot insertion is the only vertical descent.  The spline needs only its two endpoints.
     down, prev = [], np.radians(carry[-1])
-    for f in (0.0, 1.0):
+    n_down = max(2, int(np.ceil((Ta[2, 3] - Ti[2, 3]) / 0.05)) + 1)   # a knot every 5 cm: the joint line between two
+    for f in np.linspace(0.0, 1.0, n_down):                            # knots 17 cm apart swung 6.4 mm off the vertical
         T = Ta.copy()
         T[2, 3] = (1.0 - f) * Ta[2, 3] + f * Ti[2, 3]
         prev = k.ik(T, prev)
@@ -202,6 +235,7 @@ def sparse_demo_plan(path, k, lift, home):
         raise RuntimeError(f'demo path has {total} waypoints (> 40)')
     plan.update(margin_m=0.0, accepted=True, reasons=[], collision_check='skipped after grasp',
                 demo_sparse=dict(approach=3, lift=len(lift), carry=len(carry), place_cycle=len(cycle), total=total,
+                                 carry_height_m=round(float(z_c), 3), plate_over_rim_m=round(float(spl), 3),
                                  release_after='descend', speed_deg_s=60.0))
     plan.setdefault('quadrant_plan', {})['drop_start'] = len(carry) - 1
     plan['source'] = plan.get('source', '') + ' | 10/29 sparse demo <=40, post-grasp collision unchecked'
@@ -323,7 +357,7 @@ def gripper_path(a, k, Tbb, Tbc, mq, lift, grasp, home):
             sys.exit(f'REFUSED (gripper path): {leg} beyond a joint limit with wrist offset {off[3:].round(1).tolist()}')
     plan['source'] += f' | gripper path for the hand, wrist offset J4-J6 {off[3:].round(1).tolist()} deg (no hand collision check)'
     Path(path).write_text(json.dumps(plan, indent=1))
-    sparse_demo_plan(path, k, lift, home)
+    sparse_demo_plan(path, k, lift, home, tool_m=float(tg[2, 3]))   # the gripper plate model
     plan = json.loads(Path(path).read_text())
     L = plan['legs']
     print(f'wrist offset J4/J5/J6 {off[3:].round(1).tolist()} deg (--wrist d4 d5 d6 to change)', flush=True)

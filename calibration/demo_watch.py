@@ -119,6 +119,46 @@ def bowl_quadrants(dets, depth, K, Tbc, Tb, min_conf=0.2, min_points=80, share=0
     return out
 
 
+DEPTH_BAND = (-0.05, 0.05)  # (10/29) basket frame z around the rim: a standing plate / a bowl fills it, the tines hardly
+DEPTH_MIN = 120             # points (stride 2) in a quadrant's band = taken (10/22 red plate Q3 263, empty Q3 0, Q4 tines 56)
+
+
+def depth_occupancy(depth, K, Tbc, Tb, posj=None):
+    """(보스 10/29: a plate put in the basket is an obstacle for the next one, seen in real time) basket quadrants taken,
+    from depth alone (YOLOE gives a plate standing in the rack 0.10-0.16): points in the rim band per quadrant.  -> {q:
+    dict(n, kind 'plate' (thin along the pin row) / 'bowl', pin (plate: nearest gap of the measured basket), pts (base))}."""
+    from basket_vision import arm_points, cloud
+    import plate_plans as pp
+    P, _ = cloud(np.ones(depth.shape, bool), depth, K, Tbc, stride=2)
+    if posj is not None and len(P):
+        from scipy.spatial import cKDTree
+        d, _ = cKDTree(arm_points(posj)).query(P)
+        P = P[d > 0.04]
+    Ti = np.linalg.inv(Tb)
+    L = P @ Ti[:3, :3].T + Ti[:3, 3]
+    sel = (np.abs(L[:, 0]) < HALF[0] - 0.015) & (np.abs(L[:, 1]) < HALF[1] - 0.015) & (L[:, 2] > DEPTH_BAND[0]) & (L[:, 2] < DEPTH_BAND[1])
+    P, L = P[sel], L[sel]
+    qs = np.array([quadrant_of(l[:2]) or '' for l in L])
+    rq = {m: r for r, m in pp.robot_quadrants(Tb).items()}       # basket model quadrant -> robot quadrant name
+    out = {}
+    for q in QUADRANTS:
+        m = qs == q
+        if m.sum() < DEPTH_MIN:
+            continue
+        x, y = L[m, 0], L[m, 1]
+        sx, sy = (float(np.percentile(v, 90) - np.percentile(v, 10)) for v in (x, y))
+        # a standing plate is long across the pin row, short along it (10/22 Q3: 5 x 13 cm); a bowl the other way
+        # round from the camera (Q1 / Q2: 15 x 7 cm)
+        info = dict(n=int(m.sum()), kind='plate' if sy > 1.5 * sx else 'bowl', pts=P[m])
+        if info['kind'] == 'plate':
+            gaps = pp.basket_gaps()[q]
+            n_ = len(gaps)
+            xm = float(np.median(x))
+            info['pin'] = min(range(1, n_ + 1), key=lambda pin: abs(gaps[pp.pin_gap(Tb, q, pin)][0] - xm))
+        out[rq.get(q, q)] = info
+    return out
+
+
 def bowl_boxes(dets, depth, K, Tbc, posj=None):
     """Bowls -> oriented boxes (name, centre, size, R, conf, n) in base, like basket_vision.obstacle_boxes."""
     from types import SimpleNamespace
@@ -226,6 +266,25 @@ def draw_audience(rgb, dets, K, Tbc, Tb, chosen=None):
     return img
 
 
+def draw_depth_obstacles(img, occ, K, Tbc):
+    """Plates standing in the basket (depth_occupancy; YOLOE misses them) drawn as 'obstacle', as the bowls are."""
+    Tcb = np.linalg.inv(Tbc)
+    col = (245, 80, 70)
+    for q, info in occ.items():
+        if info['kind'] != 'plate':
+            continue
+        C = info['pts'] @ Tcb[:3, :3].T + Tcb[:3, 3]
+        uv = ((C @ K.T)[:, :2] / C[:, 2:3]).astype(np.int32)
+        hull = cv2.convexHull(uv)
+        over = img.copy()
+        cv2.fillConvexPoly(over, hull, col)
+        img = cv2.addWeighted(over, 0.28, img, 0.72, 0)
+        cv2.polylines(img, [hull], True, col, 2, cv2.LINE_AA)
+        x0, y0 = hull[:, 0, 0].min(), hull[:, 0, 1].min()
+        cv2.putText(img, 'obstacle', (int(x0), max(18, int(y0) - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, col, 2)
+    return img
+
+
 def load_basket(path):
     try:
         r = json.loads(Path(path).read_text())
@@ -268,13 +327,14 @@ def detect_live(a):
             serial = str(pp.C['cameras']['fixed_serial'])
         cam = D455Source(serial=serial)
     win, last, t_prev, n_frames = 'YOLOE detect', 0.0, time.perf_counter(), 0
+    occ_cache, depth = {}, None
     cv2.namedWindow(win, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(win, 1280, 960)
     try:
         while True:
             if cam is not None:
                 fr = cam.read()
-                rgb, K = fr.rgb, np.asarray(fr.K, float)
+                rgb, K, depth = fr.rgb, np.asarray(fr.K, float), fr.depth
                 if a.write_share:
                     write_rgbd_share(a.share, fr)
             else:
@@ -286,6 +346,7 @@ def detect_live(a):
                         continue
                     last, rgb = float(z['t']), z['rgb']
                     K = np.asarray(z['K'], float) if 'K' in z else None
+                    depth = z['depth'] if 'depth' in z else None
                 except (OSError, ValueError, KeyError):
                     time.sleep(0.05)
                     continue
@@ -296,6 +357,10 @@ def detect_live(a):
             ms = (time.perf_counter() - t0) * 1000
             if a.audience:
                 img = draw_audience(rgb, dets, K, Tbc, Tb)
+                if Tb is not None and Tbc is not None and K is not None and depth is not None:
+                    if n_frames % 3 == 0:                     # (보스 10/29) a plate put in the basket = obstacle, live
+                        occ_cache = depth_occupancy(depth, K, Tbc, Tb)
+                    img = draw_depth_obstacles(img, occ_cache, K, Tbc)
             else:
                 img = rgb.copy()
                 for name, c, _, mk in dets:                    # masks lightly filled so a missed bowl is obvious

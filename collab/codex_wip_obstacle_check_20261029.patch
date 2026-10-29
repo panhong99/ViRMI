@@ -1,0 +1,228 @@
+diff --git a/calibration/basket_vision.py b/calibration/basket_vision.py
+index b123a11..c209ac4 100644
+--- a/calibration/basket_vision.py
++++ b/calibration/basket_vision.py
+@@ -86,6 +86,54 @@ def obstacle_boxes(det, rack, depth, K, Tbc, posj=None, min_conf=0.25, min_point
+     return out
+ 
+ 
++def basket_obstacle_boxes(det, depth, K, Tbc, Tbb, posj=None, min_conf=0.25, min_points=80, pad=0.015):
++    """YOLOE plates whose depth centre lies inside the fitted basket -> base-frame OBBs.
++
++    These are deliberately separate from :func:`obstacle_boxes`, which keeps
++    plates on the table.  A later pick cycle consumes these boxes as standing
++    obstacles.  The plate mask is eroded before back-projection so rack wires
++    and depth bleeding at the silhouette do not enlarge the box excessively.
++    """
++    from scipy.spatial import cKDTree
++    out, Tbi = [], np.linalg.inv(np.asarray(Tbb, float))
++    arm = cKDTree(arm_points(posj)) if posj is not None else None
++    for i, (mk, conf) in enumerate(getattr(det, 'plate_masks', [])):
++        if conf < min_conf:
++            continue
++        inner = cv2.erode(mk.astype(np.uint8), np.ones((5, 5), np.uint8)).astype(bool)
++        P, _ = cloud(inner, depth, K, Tbc)
++        P = P[P[:, 2] > 0.0]                                  # remove the table below the basket
++        if arm is not None and len(P):
++            dist, _ = arm.query(P)
++            P = P[dist > 0.04]
++        if len(P) < min_points:
++            continue
++        med = np.median(P, axis=0)
++        P = P[np.linalg.norm(P - med, axis=1) < 0.22]          # reject depth bleeding off the plate rim
++        if len(P) < min_points:
++            continue
++        local = (Tbi @ np.r_[np.median(P, axis=0), 1.0])[:3]
++        if not (abs(local[0]) < 0.30 and abs(local[1]) < 0.29 and -0.19 < local[2] < 0.10):
++            continue
++        mu = P.mean(0)
++        _, _, Vt = np.linalg.svd(P - mu, full_matrices=False)
++        R = Vt.T
++        if np.linalg.det(R) < 0:
++            R[:, -1] *= -1
++        L = (P - mu) @ R
++        lo, hi = np.percentile(L, 2, axis=0), np.percentile(L, 98, axis=0)
++        raw = hi - lo
++        # A real plate is about 27 cm across.  Reject a mask dominated by the
++        # basket/background rather than publishing a huge false obstacle.
++        if raw.max() > 0.40 or np.partition(raw, -2)[-2] > 0.36:
++            continue
++        size = np.maximum(raw + 2 * pad, [0.035, 0.035, 0.035])
++        centre = mu + R @ ((lo + hi) / 2)
++        out.append((f'basket_plate_{i}', np.round(centre, 4).tolist(), np.round(size, 4).tolist(),
++                    np.round(R, 5).tolist(), round(float(conf), 3), int(len(P))))
++    return out
++
++
+ def cloud(mask, depth, K, Tbc, stride=1):
+     v, u = np.nonzero(mask[::stride, ::stride])
+     v, u = v * stride, u * stride
+@@ -330,7 +378,8 @@ def estimate(det, rgb, depth, K, Tbc, z_rim, posj=None, M=None):
+     why = [w for w, bad in (('handle not seen', n_handle < MIN_HANDLE), ('few points', len(P) < MIN_POINTS),
+                             (f'basket occluded (cover {cover:.2f})', MIN_COVER is not None and cover < MIN_COVER)) if bad]
+     return dict(T=T, conf=conf, cost=cost, n_top=len(P), n_handle=n_handle, cover=cover, refused=', '.join(why),
+-                obstacles=obstacle_boxes(det, rack, depth, K, Tbc, posj))
++                obstacles=obstacle_boxes(det, rack, depth, K, Tbc, posj),
++                basket_obstacles=basket_obstacle_boxes(det, depth, K, Tbc, T, posj))
+ 
+ 
+ def live(share, Tbc, posj, z_rim, n=5, gap_s=0.6, timeout_s=40.0, max_spread_mm=6.0, max_spread_deg=1.5, stale_s=5.0):
+@@ -409,7 +458,8 @@ def combine(res, z_rim, max_spread_mm, max_spread_deg):
+     return dict(ok=ok, why='' if ok else f'frames disagree: {spread_mm:.1f} mm, {spread_deg:.1f} deg', T=T.tolist(),
+                 spread_mm=spread_mm, spread_deg=spread_deg, frames=len(res), dropped_turned=dropped,
+                 conf=float(np.median([r['conf'] for r in res])), n_points=int(np.median([r['n_top'] for r in res])),
+-                obstacles=max((r.get('obstacles', []) for r in res), key=len))   # (10/22) plates outside the basket
++                obstacles=max((r.get('obstacles', []) for r in res), key=len),   # (10/22) plates outside the basket
++                basket_obstacles=max((r.get('basket_obstacles', []) for r in res), key=len))
+ 
+ 
+ def main():
+diff --git a/tesollo/dg5fs_sdk.py b/tesollo/dg5fs_sdk.py
+index f1c62df..db63f57 100644
+--- a/tesollo/dg5fs_sdk.py
++++ b/tesollo/dg5fs_sdk.py
+@@ -232,8 +232,10 @@ def basket(obj, quadrant, pin, centre_h=None):
+     bowl: upright into the middle of a quadrant), then lift, to_above and descend (Enter per leg); BASKET['down'] once
+     the descend has run, so 'release' knows the object is in the basket.  -> None: no plan, False: a leg stopped, True."""
+     if TAUGHT_IX[0] is not None and obj == 'plate':      # (보스 10/29) the pendant-taught insert, one sparse spline after
++        placed = load_state()['plates']
+         out = subprocess.run([str(PLAN_PY), str(REPO / 'tesollo/taught_plan.py'), '--index', str(TAUGHT_IX[0]),   # the grasp
+                               '--quadrant', quadrant, '--pin', str(pin), '--dx', str(SHIFT[0]), '--dy', str(SHIFT[1])]
++                             + (['--plates'] + [f'{p_["q"]}:{p_["pin"]}' for p_ in placed] if placed else [])
+                              + (['--basket', BASKET_JSON[0]] if BASKET_JSON[0] else []), capture_output=True, text=True)
+     else:
+         out = None
+diff --git a/tesollo/taught_plan.py b/tesollo/taught_plan.py
+index 93b909e..56cde70 100644
+--- a/tesollo/taught_plan.py
++++ b/tesollo/taught_plan.py
+@@ -25,6 +25,7 @@ from basket_plan import shifted_grasp
+ 
+ TAUGHT = HERE / 'taught_inserts.json'
+ MAX_KNOTS, KNOT_DEG = 20, 30.0
++OBSTACLE_MARGIN_M = 0.015
+ 
+ 
+ def knots(qs, step=KNOT_DEG):
+@@ -37,6 +38,51 @@ def knots(qs, step=KNOT_DEG):
+     return out
+ 
+ 
++def _box_clearance(points, box):
++    """Signed point-to-oriented-box distance (positive outside, negative inside)."""
++    _, centre, size, R = box[:4]
++    L = np.abs((np.asarray(points) - np.asarray(centre)) @ np.asarray(R)) - np.asarray(size) / 2
++    return float((np.linalg.norm(np.maximum(L, 0.0), axis=1) + np.minimum(L.max(1), 0.0)).min())
++
++
++def _tool_cloud(length=0.12, radius=0.06):
++    z = np.linspace(0.0, length, 13)
++    a = np.linspace(0.0, 2 * np.pi, 20, endpoint=False)
++    rings = [np.c_[radius * np.cos(a), radius * np.sin(a), np.full(len(a), zz)] for zz in z]
++    return np.vstack(rings + [np.c_[np.zeros(len(z)), np.zeros(len(z)), z]])
++
++
++def obstacle_clearance(k, knots_deg, boxes, local_cloud, per=24):
++    """Minimum clearance of a sparse controller spline to observed/remembered plates."""
++    if not boxes:
++        return float('inf')
++    dense, _ = pp.equal_time_spline(np.asarray(knots_deg, float), per=per)
++    best = float('inf')
++    for q in dense:
++        F = k.fk(np.radians(q))
++        world = np.asarray(local_cloud) @ F[:3, :3].T + F[:3, 3]
++        best = min(best, *(_box_clearance(world, b) for b in boxes))
++    return best
++
++
++def plate_obstacles(basket_data, Tbb, plate_specs):
++    """Fuse live YOLOE+depth boxes with slots remembered after successful releases."""
++    live = [tuple(b[:4]) for b in basket_data.get('basket_obstacles', [])]
++    known = []
++    # A live OBB contains the actual lean/orientation, so do not also add the
++    # coarser slot model for the same scene.  Remembered slots are fail-safe
++    # fallback only when YOLOE/depth did not return any basket plate.
++    if plate_specs and not live:
++        rq = pp.robot_quadrants(Tbb)
++        slots = []
++        for spec in plate_specs:
++            qd, pin = spec.split(':')
++            model_q = rq[qd]
++            slots.append((model_q, pp.pin_gap(Tbb, model_q, int(pin))))
++        known = [b for b in pp.basket_boxes(Tbb, plates=slots) if b[0].startswith('plate_')]
++    return live + known, len(live), len(known)
++
++
+ def main():
+     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+     p.add_argument('--index', type=int, default=-1, help='taught_inserts.json entry (default the last)')
+@@ -46,6 +92,14 @@ def main():
+     p.add_argument('--dx', type=float, default=0.0)
+     p.add_argument('--dy', type=float, default=0.0)
+     p.add_argument('--rise', type=float, default=0.20, help='straight lift after the grasp before the carry [m] (보스 20 cm)')
++    p.add_argument('--plates', nargs='*', default=[], help='plates already placed, Q3:6 Q3:12; fused with live YOLOE+depth')
++    p.add_argument('--obstacle_check', action='store_true',
++                   help='(opt-in, Codex 10/29) refuse when the hand / held plate comes within --obstacle_margin of plates '
++                        'already in the basket.  Off by default: the taught entry\'s plate_in_tcp is the gripper-path model, '
++                        'its plate lies 90 deg off the seated one (spans x -0.13..0.13 in the basket at the insert), and the '
++                        'hand is a 6 cm-radius cylinder, so it refused every second pin (Q3:12 / 10 after Q3:6, -10 mm)')
++    p.add_argument('--obstacle_margin', type=float, default=OBSTACLE_MARGIN_M,
++                   help='minimum hand/held-plate clearance from prior plate obstacles [m]')
+     a = p.parse_args()
+     e = json.loads(TAUGHT.read_text())[a.index]
+     pts = e['waypoints_deg']
+@@ -58,7 +112,8 @@ def main():
+     grasp = np.array(shifted_grasp(k, A['posj_deg'], a.dx, a.dy), float)
+     home = list(map(float, pp.C['robot']['home_joints_deg']))
+     Tt = np.array(e['basket_T'])
+-    Tn = np.array(json.loads(Path(a.basket).read_text())['T']) if a.basket else Tt
++    basket_data = json.loads(Path(a.basket).read_text()) if a.basket else {'T': Tt.tolist()}
++    Tn = np.array(basket_data['T'])
+     D = Tn @ np.linalg.inv(Tt)                                   # the basket since the teaching
+     pin = a.pin or e['pin']
+     if pin != e['pin']:                                          # the same quadrant, another gap: along the pin row
+@@ -100,12 +155,33 @@ def main():
+         W = np.array(w)
+         if np.abs(W[:, 4]).max() > 132 or np.abs(W[:, 2]).max() > 157:
+             sys.exit(f'REFUSED: {name} near a joint limit')
++    obstacles, live_n, known_n = plate_obstacles(basket_data, Tn, a.plates) if a.obstacle_check else ([], 0, 0)
++    if obstacles:
++        tool = np.eye(4)
++        tool[2, 3] = 0.12
++        held = np.vstack([_tool_cloud(), pp.plate_cloud(np.asarray(e['plate_in_tcp'], float), tool)])
++        hand = _tool_cloud()
++        clear_post = obstacle_clearance(k, post, obstacles, held)
++        clear_insert = obstacle_clearance(k, ins, obstacles, held)
++        clear_return = obstacle_clearance(k, back, obstacles, hand)
++        clearance = min(clear_post, clear_insert, clear_return)
++        if clearance < a.obstacle_margin:
++            sys.exit(f'REFUSED: prior plate obstacle clearance {clearance * 1000:.1f} mm '
++                     f'(< {a.obstacle_margin * 1000:.0f} mm; live {live_n}, remembered slices {known_n})')
++        obstacle_report = dict(live=live_n, remembered_slices=known_n, margin_m=a.obstacle_margin,
++                               post_grasp_m=clear_post, insert_m=clear_insert, return_home_m=clear_return)
++    else:
++        obstacle_report = dict(live=0, remembered_slices=0, margin_m=a.obstacle_margin)
+     # report only (no gate): the flange over the basket on the carry, basket frame (rim = 0)
+     over = [(np.linalg.inv(Tn) @ k.fk(np.radians(q))[:, 3])[:3] for q in pp.equal_time_spline(np.array(post[:4]), per=40)[0]]
+     inside = [b[2] for b in over if abs(b[0]) < 0.30 and abs(b[1]) < 0.30]
+     plan = dict(dry_run=True, accepted=True, reasons=[], margin_m=0.0, created=time.strftime('%Y-%m-%d %H:%M:%S'),
+                 source=f'taught insert #{a.index} {e["quadrant"]} pin {pin} (taught pin {e["pin"]}, {e["time"]}), {note}; '
+-                       'sparse, no collision sweep', basket_T=Tn.tolist(), plate_in_tcp=e.get('plate_in_tcp'), tool_length_m=0.12,
++                       'sparse, prior-plate selective check', basket_T=Tn.tolist(), plate_in_tcp=e.get('plate_in_tcp'),
++                tool_length_m=0.12,
++                obstacles=[[b[0], np.asarray(b[1]).tolist(), np.asarray(b[2]).tolist(), np.asarray(b[3]).tolist()]
++                           for b in obstacles],
++                obstacle_check=obstacle_report,
+                 legs={n: dict(waypoints_deg=np.round(w, 3).tolist(), min_clearance_straight_m=0.0, planner='taught sparse')
+                       for n, w in (('to_grasp', [home, grasp.tolist()]), ('post_grasp', post), ('insert', ins),
+                                    ('return_home', back))})
+@@ -116,6 +192,9 @@ def main():
+     print(f'OK: taught {e["quadrant"]} pin {pin}: post_grasp {len(post)} knots (grasp, up 5 / {a.rise * 100:.0f} cm, teach 1, '
+           f'teach 2), insert 2 knots, return_home {len(back)} knots; carry flange over the basket >= '
+           f'{min(inside) * 100 if inside else float("nan"):.0f} cm over the rim (TCP not checked)')
++    if obstacles:
++        print(f'  obstacles: live {live_n}, remembered {len(a.plates)} plate(s); minimum clearance '
++              f'{min(obstacle_report[k_] for k_ in ("post_grasp_m", "insert_m", "return_home_m")) * 1000:.1f} mm')
+     for n in ('post_grasp', 'insert', 'return_home'):
+         print(f'  {n}: {len(plan["legs"][n]["waypoints_deg"])} waypoints, end {plan["legs"][n]["waypoints_deg"][-1]}')
+     print('plan:', out / 'plan.json')

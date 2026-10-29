@@ -4,7 +4,7 @@ Same rule as the 11/3 spectator view (calibration/demo_watch.py: bowl / plate ma
 basket, 150 points = taken); a quadrant counts as taken when it is taken in at least half of the frames.  The arm must be
 out of the view (home).  The camera must be free.
     ~/miniconda3/envs/foundationpose/bin/python tesollo/empty_quadrant.py --basket /tmp/tesollo_basket_X.json
--> last line: RESULT {"Q1": "bowl" | "plate" | null, ...}
+-> PLATES {"Q3": 12} (plates standing in the basket, from depth, pin nearest to it), last line RESULT {"Q1": "bowl" | "plate" | null, ...}
 """
 import argparse
 import json
@@ -31,7 +31,7 @@ def main():
     Tb = np.array(json.loads(Path(a.basket).read_text())['T'])
     det = dw.Detector()
     cam = FixedFrames(pp.C['cameras']['fixed_serial'])
-    votes = []
+    votes, pins = [], {}
     try:
         for _ in range(15 if cam.cam is not None else 0):     # auto exposure settles (a shared camera has)
             cam.read()
@@ -41,7 +41,13 @@ def main():
             dets = det(fr.rgb)
             counts = dw.bowl_quadrants(dets, fr.depth, K, Tbc, Tb)
             plates = dw.bowl_quadrants(dets, fr.depth, K, Tbc, Tb, min_conf=0.15, name='plate')
-            votes.append(dw.occupied(counts, plates))
+            occ = dw.occupied(counts, plates)
+            # (보스 10/29) a plate standing in the basket: YOLOE scores it 0.10-0.16, depth sees it (arm home cut out)
+            for q, info in dw.depth_occupancy(fr.depth, K, Tbc, Tb, posj=list(pp.HOME_JOINTS_DEG)).items():
+                occ[q] = occ[q] or info['kind']
+                if info.get('pin'):
+                    pins.setdefault(q, []).append(info['pin'])
+            votes.append(occ)
     finally:
         cam.stop()
     occ = {}
@@ -49,6 +55,10 @@ def main():
         seen = [v[q] for v in votes if v[q]]
         occ[q] = max(set(seen), key=seen.count) if len(seen) * 2 >= len(votes) else None
     print('quadrants: ' + ', '.join(f'{q} {occ[q] or "empty"} ({sum(1 for v in votes if v[q])}/{len(votes)})' for q in sorted(occ)))
+    plate_pins = {q: int(np.median(v)) for q, v in pins.items() if len(v) * 2 >= len(votes) and occ[q] == 'plate'}
+    if plate_pins:
+        print('plates standing in the basket (depth): ' + ', '.join(f'{q} pin {p_}' for q, p_ in plate_pins.items()))
+    print('PLATES ' + json.dumps(plate_pins))
     print('RESULT ' + json.dumps(occ))
 
 

@@ -132,6 +132,7 @@ AUTO = [True]               # (보스 10/29) no Enter between the steps: seen ->
 TAUGHT_IX = [None]          # (--taught [N], 보스 10/29) plate: basket = the taught insert N of taught_inserts.json
 TEACH = [False]             # (--teach, 보스 10/29) plate: the plan stops above the basket, the insert is taught by the pendant
 TAUGHT = REPO / 'tesollo/taught_inserts.json'   # every taught insert: joints + basket pose + plate in the hand
+SEEN_PINS = {}              # quadrant -> pin of a plate seen standing there at the start (depth, empty_quadrant.py)
 SEEN = {}                   # quadrant -> 'bowl' / 'plate' / None, the fixed camera at the start of this run (empty_quadrant.py)
 BOWL_QUADRANTS = ('Q1', 'Q2', 'Q4', 'Q3')       # far ones first: Q3 / Q4 stay free for the plates
 PLATE_QUADRANTS = ('Q3', 'Q4')
@@ -163,7 +164,9 @@ def see_quadrants():
         print(f'   quadrants not seen (only the remembered ones count):\n{out.stderr[-400:]}', flush=True)
         return
     SEEN.update(json.loads(m.group(1)))
-    print(out.stdout.strip().splitlines()[-2], flush=True)
+    mp = re.search(r'^PLATES (.+)$', out.stdout, re.M)
+    SEEN_PINS.update(json.loads(mp.group(1)) if mp else {})
+    print('\n'.join(l for l in out.stdout.splitlines() if l.startswith(('quadrants', 'plates standing'))), flush=True)
 
 
 def front_pins(q, taken):
@@ -182,13 +185,19 @@ def back_pins(q, taken):
 def auto_targets(obj):
     """[(quadrant, pin, why)] to try in order for 'basket' alone."""
     st = load_state()
+    # (보스 10/29) a plate seen in the basket is an obstacle like a remembered one: the next plate goes behind it
+    placed = st['plates'] + [dict(q=q, pin=p_) for q, p_ in SEEN_PINS.items()
+                             if not any(r['q'] == q and abs(r['pin'] - p_) <= 2 for r in st['plates'])]
+    st = dict(st, plates=placed)
     plate_q = [p_['q'] for p_ in st['plates']]
-    full = {q for q, v in SEEN.items() if v} | set(st['bowls'])
+    full = {q for q, v in SEEN.items() if v and not (v == 'plate' and q in SEEN_PINS)} | set(st['bowls'])
     if obj == 'bowl':
         return [(q, 6, 'empty') for q in BOWL_QUADRANTS if q not in full and q not in plate_q]
     if plate_q and plate_q.count(plate_q[-1]) == 1:            # the 2nd plate: back of the 1st one's quadrant
         q = plate_q[-1]
         taken = [p_['pin'] for p_ in st['plates'] if p_['q'] == q]
+        if taken[0] > PINS // 2:                                # the one there stands at the back: this one in front
+            return [(q, pin, f'front (back plate at pin {taken[0]})') for pin in front_pins(q, taken)]
         return [(q, pin, f'back (front plate at pin {taken[0]})') for pin in back_pins(q, taken)]
     return [(q, pin, 'front') for q in PLATE_QUADRANTS if q not in full and q not in plate_q for pin in front_pins(q, [])]
 

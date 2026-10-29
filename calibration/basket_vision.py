@@ -21,6 +21,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parent.parent
 PROMPTS = ['dish drying rack', 'plate']             # rack mask; plates standing in it are cut out
 CUT = []                                            # (10/23 11/3 시연, opt-in --cut bowl) more prompts cut out of the rack mask
+MAJORITY = [0]                                      # (10/29, opt-in --majority K) keep the >= K frames of one 180-degree turn
 MIN_HANDLE, MIN_POINTS = 20, 6000                   # below: refuse (look again with the arm out of the view)
 # One-time offset of the rack structure (rl/assets/basket_full.obj walls/rails/handle) from the frame the slots are
 # defined in: median of 25 marker frames on 10/19 17:00-19:30 (experiments/basket_free model_v5): fit = marker + (-3.0, -24.4) mm.
@@ -387,6 +388,14 @@ def combine(res, z_rim, max_spread_mm, max_spread_deg):
     why = sorted({r['refused'] for r in res if r.get('refused')})
     if why:
         return dict(ok=False, why='; '.join(why), frames=len(res))
+    dropped = 0
+    if MAJORITY[0]:                                  # (10/29 real: 1 of 5 frames picked the handle's 180-degree turn, the
+        yaws = np.array([np.arctan2(r['T'][1, 0], r['T'][0, 0]) for r in res])   # other 4 agreed within 1 mm / 0.2 deg)
+        same = [np.abs((yaws - y0 + np.pi) % (2 * np.pi) - np.pi) < np.pi / 2 for y0 in yaws]
+        best = max(same, key=lambda m: m.sum())
+        if best.sum() < MAJORITY[0]:
+            return dict(ok=False, why=f'180-degree turn undecided: {int(best.sum())}/{len(res)} frames agree', frames=len(res))
+        dropped, res = int(len(res) - best.sum()), [r for r, k in zip(res, best) if k]
     xy = np.array([r['T'][:2, 3] for r in res])
     yaw = np.array([np.arctan2(r['T'][1, 0], r['T'][0, 0]) for r in res])
     yaw = yaw[0] + (yaw - yaw[0] + np.pi) % (2 * np.pi) - np.pi
@@ -398,7 +407,7 @@ def combine(res, z_rim, max_spread_mm, max_spread_deg):
     T[:2, 3], T[2, 3] = mxy, z_rim
     ok = spread_mm <= max_spread_mm and spread_deg <= max_spread_deg
     return dict(ok=ok, why='' if ok else f'frames disagree: {spread_mm:.1f} mm, {spread_deg:.1f} deg', T=T.tolist(),
-                spread_mm=spread_mm, spread_deg=spread_deg, frames=len(res),
+                spread_mm=spread_mm, spread_deg=spread_deg, frames=len(res), dropped_turned=dropped,
                 conf=float(np.median([r['conf'] for r in res])), n_points=int(np.median([r['n_top'] for r in res])),
                 obstacles=max((r.get('obstacles', []) for r in res), key=len))   # (10/22) plates outside the basket
 
@@ -414,8 +423,11 @@ def main():
     a.add_argument('--camera', help='fixed D455 serial, or "fixed" = config camera/calibration/home joints: open the camera here instead of --share (10/21 look4)')
     a.add_argument('--save', help='--camera: save the first frame here (npz)')
     a.add_argument('--cut', nargs='+', default=[], help="(10/23, opt-in) more YOLOE prompts cut out of the rack mask, e.g. bowl")
+    a.add_argument('--majority', type=int, default=0, help='(10/29, opt-in) drop the frames that picked the other 180-degree '
+                                                           'turn when >= this many agree (e.g. 4 of --n 5)')
     a = a.parse_args()
     CUT[:] = a.cut
+    MAJORITY[0] = a.majority
     if a.camera == 'fixed':                         # (look4) the config's camera, calibration, home joints, rim height
         import calib_core as cc
         import plate_plans as pp

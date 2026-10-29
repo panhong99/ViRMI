@@ -42,6 +42,10 @@ HANG_AXIS = (-0.94, 0.35, 0.01)
 BOWL_HEIGHT_M = 0.07        # perceive gives the bowl rim top (10/27 ref 0.072 m on the table): bottom = top - this
 BOWL_DROP_M = -0.07         # bowl bottom vs the basket rim when it is let go (보스 10/27 real Q3: +3 cm stopped 10 cm too high)
 BOWL_SHIFT_M = (0.0, 0.10)  # + this (base xy) on the quadrant middle (보스 10/27 real Q3: 10 cm more toward robot +y)
+# (10/29) PLATE_SHIFT_M / BOWL_SHIFT_M were the stale fixed basket file, not the hand: measured live 10/29 the basket sat
+# (-37, +109) mm, 0.9 deg from demo_basket_fixed.json - the +y the real runs needed.  They apply only with that file;
+# a live basket_vision measurement (--basket <json>) uses none.
+FIXED_BASKET = HERE.parent / 'calibration/data/basket/demo_basket_fixed.json'
 BOWL_RISE_M = 0.22          # lift (and above-basket height): the bowl bottom must clear the rim (0.144 m) + 5 cm on the carry
 # basket frame quadrant extents (calibration/demo_watch.py HALF / SPLIT): x near (-0.265, 0.035) / far (0.035, 0.265),
 # y left (0.0095, 0.26) / right (-0.26, 0.0095)
@@ -191,8 +195,16 @@ def main():
                                                   'basket frame -> x_shift (on the config trim), y_extra, centre_h + dz.  Learned '
                                                   'for one nominal hang with a measured in-hand pose: use with measure_held.py')
     p.add_argument('--rise', type=float, default=0.12, help='lift before the carry (arm_plan.py lift)')
-    p.add_argument('--basket', default=str(HERE.parent / 'calibration/data/basket/demo_basket_fixed.json'))
+    p.add_argument('--basket', default=str(FIXED_BASKET), help='basket_vision.json (T); default the fixed 11/3 file (stale: '
+                                                                'measure it, see dg5fs_sdk.py / calibration/basket_vision.py)')
     a = p.parse_args()
+    a.basket = str(START_CWD / a.basket) if not Path(a.basket).is_absolute() else a.basket
+    stale = Path(a.basket).resolve() == FIXED_BASKET.resolve()
+    if not stale:
+        global PLATE_SHIFT_M, BOWL_SHIFT_M
+        PLATE_SHIFT_M, BOWL_SHIFT_M = (0.0, 0.0), (0.0, 0.0)
+    print(f'basket from {a.basket}' + (' (FIXED 11/3 file + the 10/27 by-eye shifts)' if stale else ' (measured: no shifts)'),
+          flush=True)
     a.quadrant = a.quadrant or ('Q3' if a.object == 'plate' else 'Q1')
     if a.object == 'bowl' and a.rise == 0.12:
         a.rise = BOWL_RISE_M

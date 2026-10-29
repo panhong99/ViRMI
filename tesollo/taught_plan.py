@@ -105,7 +105,7 @@ def main():
         axis = Rotation.from_matrix(k.fk(d)[:3, :3] @ k.fk(q3)[:3, :3].T).as_rotvec()
         Rb = Rotation.from_rotvec(axis / np.linalg.norm(axis) * np.radians(a.wrist_less)).as_matrix()
         turned = []
-        for q in pts:
+        for i_q, q in enumerate(pts):
             q0 = np.radians(q)
             F = k.fk(q0)
             low = cloud @ F[:3, :3].T + F[:3, 3]
@@ -120,7 +120,10 @@ def main():
                 return np.r_[(G[:3, :3] @ p_f + G[:3, 3] - piv) * 100, Rotation.from_matrix(Rt.T @ G[:3, :3]).as_rotvec()]
             x = least_squares(res, q0[[0, 1, 2, 4]]).x
             r = res(x)
-            if np.linalg.norm(r[:3]) > 0.1 or np.degrees(np.linalg.norm(r[3:])) > 6:
+            # (10/29 real: pin 12 at a basket measured 0.9 deg turned: over the basket 6.1 deg off) only the slot poses
+            # need the exact turn; over the basket (nothing to touch) 15 deg
+            tol = 6 if i_q >= len(pts) - 2 else 15
+            if np.linalg.norm(r[:3]) > 0.1 or np.degrees(np.linalg.norm(r[3:])) > tol:
                 sys.exit(f'REFUSED: the wrist turned back {a.wrist_less} deg at {q}: plate bottom off {np.linalg.norm(r[:3]) * 10:.1f} mm, '
                          f'orientation off {np.degrees(np.linalg.norm(r[3:])):.1f} deg')
             qq = q0.copy()

@@ -20,6 +20,7 @@ over the floor, plate plane within 20 deg of the tine plane (quadrant tine lean,
 import argparse
 import json
 import math
+import os
 import sys
 import time
 from pathlib import Path
@@ -173,7 +174,7 @@ def main():
             out.append(Tg @ Rh @ Rt @ H_nom)
         return np.array(out)
 
-    def rollout(job_of, corr, Hs, dock_residual=None, dock_zdown=None):
+    def rollout(job_of, corr, Hs, dock_residual=None, dock_zdown=None, dock_zoff=None):
         """job index, correction (dx, dy, dz basket frame) and H per env -> success (N,) and landed info.
         dock_zdown (N,) [m] (Claude 10/29, opt-in in the bundle): after the path end keep lowering the plate 2 mm a
         step along basket -z by that much before the release, as DockEnv(descend_extra_mm) does."""
@@ -196,6 +197,8 @@ def main():
                 centre_path[:, :3, 3] += (Tbb[:3, :3] @ np.c_[rr[:, :2], np.zeros(len(rr))].T).T
                 for k in range(len(centre_path)):
                     centre_path[k, :3, :3] = R.from_rotvec(Tbb[:3, 1] * rr[k, 2]).as_matrix() @ centre_path[k, :3, :3]
+            if dock_zoff is not None:                              # whole path raised: release that high (drop into the slot)
+                centre_path[:, :3, 3] += float(dock_zoff[e]) * Tbb[:3, 2]
             if n_extra[e]:
                 down = np.repeat(centre_path[-1:], n_extra[e], 0)
                 down[:, :3, 3] -= np.outer(np.minimum(np.arange(1, n_extra[e] + 1) * 0.002, dock_zdown[e]), Tbb[:3, 2])
@@ -261,6 +264,10 @@ def main():
                 rotvec = 2 * torch.atan2(vn, qe[:, :1]) * qe[:, 1:] / vn
                 wv = (rotvec / a.compliant_tau).clamp(-3.0, 3.0)
                 plate.write_root_velocity_to_sim(torch.cat((v, wv), 1))
+                if __import__('os').environ.get('COMPLIANT_DEBUG') and t % 60 == 0:
+                    pe = torch.linalg.vector_norm(tgt[:, :3] - cur_p, dim=1)
+                    print(f'  compliant t {t}: pos err p50 {pe.median() * 1000:.1f} mm, p90 {pe.quantile(.9) * 1000:.1f} mm, '
+                          f'rot err p50 {torch.rad2deg(2 * torch.atan2(vn[:, 0], qe[:, 0])).median():.1f} deg', flush=True)
             if a.hand:
                 q = robot.data.default_joint_pos.clone()
                 q[:, arm_ids] = q_path_t[torch.arange(N, device=dev), i]
@@ -330,7 +337,8 @@ def main():
         corr = np.array([corr_d.get(names[j], [0.0, 0.0, 0.0]) for j in job_of], float)
         Hs = dock['H'] if dock is not None else h_true(N)
         ok, landed = rollout(job_of, corr, Hs, dock['residual'] if dock is not None else None,
-                             dock['zdown'] if dock is not None and 'zdown' in dock else None)
+                             dock['zdown'] if dock is not None and 'zdown' in dock else None,
+                             dock['zoff'] if dock is not None and 'zoff' in dock else None)
         d = rollout.diag
         collision_free = ok & ~rollout.hand_hit
         res = {names[j]: dict(success=f'{int(ok[job_of == j].sum())}/{int((job_of == j).sum())}',

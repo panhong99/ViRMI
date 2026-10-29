@@ -20,7 +20,7 @@ import eval as E  # noqa: E402
 import side_eval as SE  # noqa: E402
 import side_render as SR  # noqa: E402
 
-CKPT = 'calibration/data/slot_cnn/run_side_v1/ep07.pt'
+CKPT = 'calibration/data/slot_cnn/run_side_v2/ep07.pt'   # 10/29 night: sim 0.994 / 0.987 (v1 0.988 / 0.973)
 N_TINES = 13
 
 

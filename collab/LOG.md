@@ -5627,3 +5627,10 @@ plate 삽입 +y 5 cm, 손목 회전 30–45° 이내, 오늘 밤 sim에서 핸�
 - `tesollo/taught_plan.py`: remembered slot 형상 대신 위 live OBB만 사용한다. 현재 `carry_insert`(또는 stepwise `post_grasp`) controller spline을 knot당 30 sample로 평가하고, held-plate cloud와 OBB 최소 여유가 **15 mm 미만이면 계획을 거부**한다. 전체 환경 충돌 sweep/RRT는 계속 사용하지 않으며 waypoint 수도 늘리지 않는다.
 - 오프라인 검증: 합성 RGB-D plate가 basket 안/밖일 때 OBB **1/0개**. 먼 OBB 계획 통과(최소 **7533.9 mm**), 첫 held-plate 점과 겹친 OBB 계획 거부(**−40.0 mm**). `py_compile`, `git diff --check`, calibration basket unit tests **11/11** 통과.
 - 한계: 실행 중인 관객 화면·카메라와 실로봇은 건드리지 않았다. 두 번째 물체 실행 때 새 바구니 측정 JSON을 사용해야 live 장애물이 들어온다. 실제 접시의 edge-on mask/깊이 누락 시에는 OBB가 없으므로 실기 전 관객 화면과 JSON을 함께 확인한다.
+
+### 2026-10-29 18:5x Codex — J6 180° 네 손가락 받침 파지 실험 (`033eb6d`)
+- 기존 `demo_safe.sh`, `dg5fs_sdk.py`, `arm_plan.py`, 저장 자세는 수정하지 않고 `tesollo/support_grasp180.py` 하나로 분리했다. 기본은 plan-only이며 `--execute`를 명시해야만 동작한다.
+- 팔: 저장 plate grasp `[17.95, 38.85, 109.37, -3.79, -57.68, -85.04]°`의 J6만 `+180°`로 바꿔 `+94.96°`로 만들었다. 기존 grasp 대비 FK TCP 위치 변화 **0.000 mm**, 자세 변화 **180.00°**. 12 cm 위에서 수직 하강하도록 연속 IK 후 controller용 plan은 **19점**, 최대 인접 변화 **12.929°**, 보수적 hand envelope 최저 z **+0.037 m**, `ros2_nodes.validate` 문제 **0개**다.
+- 손: `plate_pre9`에서 시작해 손가락 2–5는 마지막 plate contact 쪽으로 기본 70% 이동한 자세를 position mode로 유지한다. thumb만 force mode가 되도록 손가락 2–5의 16개 관절을 고정하고, `5F_2FINGER_1_AND_2` 모드에서 index를 고정해 thumb만 기본 **1.0 N**으로 닫는다. arm 기본 **10°/s**, hand **4000 ms**다.
+- 실행은 각 단계(받침 자세, arm 접근, thumb 닫기)에 Enter 확인이 있고 파지 뒤에는 팔을 움직이지 않는다. `release` 전에는 lift/carry/home 명령을 받지 않는다. 명령: `~/miniconda3/envs/foundationpose/bin/python tesollo/support_grasp180.py --execute`.
+- 한계: 실제 네 손가락 패드가 접시 밑면을 받치는지는 실물 배치와 접촉으로 확인해야 한다. 이번에는 실로봇·손을 실행하지 않았고, 접시 위치는 기존 taught 위치이므로 이동했으면 `--dx/--dy`가 필요하다.

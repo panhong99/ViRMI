@@ -311,6 +311,25 @@ def taught_plan(points, Tbc, q, source):
     return out / 'plan.json'
 
 
+def unchecked_sparse_plan(points, source):
+    """Write already solved joint knots without FK/collision densification.
+
+    Used only for the post-grasp fast path requested on 10/29.  The robot-side
+    mover still enforces plan age, joint limits and <=45 degree knot jumps.
+    """
+    legs = {}
+    for name, pts in points.items():
+        wp = thin_waypoints(pts)
+        legs[name] = dict(waypoints_deg=np.round(np.asarray(wp, float), 3).tolist(),
+                          min_clearance_straight_m=0.0, planner='sparse unchecked post-grasp')
+    plan = dict(dry_run=True, accepted=True, source=source, created=time.strftime('%Y-%m-%d %H:%M:%S'),
+                margin_m=0.0, reasons=[], collision_check='skipped after grasp', legs=legs)
+    out = DATA / 'rl_plans' / (time.strftime('%Y%m%d_%H%M%S') + f'_{int(time.time() * 1000) % 1000:03d}_sparse')
+    out.mkdir(parents=True, exist_ok=True)
+    (out / 'plan.json').write_text(json.dumps(plan, indent=1))
+    return out / 'plan.json'
+
+
 def slot_plan(k, lift_end_deg, Tbc, q):
     """Slot k after an automatic grasp: lift end -> carry -> above -> insert | insert -> retreat -> home."""
     t = json.loads((TEACH_DIR / f'slot_{k:02d}.json').read_text())['poses']
@@ -841,7 +860,34 @@ def one_go_knots(head, tail, held, inserting, floor=None, tols=(10.0, 7.0, 5.0, 
     return None, dict(tried=tried)
 
 
-def one_go_plan(grasp_plan, insert_plan, Tbc, q, Tbb, H, tool, plates=(), vel=60.0):
+def _unchecked_one_go_knots(head, tail, max_waypoints=20, max_step_deg=40.0):
+    """Reduce a pre-grasped lift/carry/insert path to controller knots only.
+
+    This intentionally performs no FK or collision work.  RDP keeps bends in
+    joint space, ``even_knots`` restores any knot needed to keep a single
+    joint jump below ``max_step_deg``, and the straight insert tail is kept.
+    """
+    head, tail = np.asarray(head, float), np.asarray(tail, float)
+    hd = np.degrees(head)
+    lo, hi = np.asarray(__import__('ros2_nodes').joint_limits_deg(), float).T
+    tail_seg = float(np.degrees(np.abs(tail[1] - tail[0]).max())) if len(tail) > 1 else None
+    tried = []
+    for tol in (3.5, 5.0, 7.0, 10.0, 15.0, 25.0, 40.0):
+        idx = even_knots(hd, rdp_joint(hd, tol), max_seg_deg=max_step_deg, tail_seg_deg=tail_seg)
+        K = np.vstack([head[idx], tail[1:]])
+        jump = float(np.degrees(np.abs(np.diff(K, axis=0)).max())) if len(K) > 1 else 0.0
+        dense, _ = equal_time_spline(np.degrees(K))
+        joint_margin = float(np.minimum(dense - lo, hi - dense).min())
+        tried.append(dict(tol_deg=tol, knots=len(K), max_step_deg=round(jump, 2),
+                          min_joint_margin_deg=round(joint_margin, 2)))
+        if len(K) <= max_waypoints and jump <= max_step_deg + 1e-6 and joint_margin >= 2.0:
+            return K, dict(tol_deg=tol, knots=len(K), head_knots=len(idx),
+                           max_step_deg=round(jump, 2), min_joint_margin_deg=round(joint_margin, 2), tried=tried)
+    return None, dict(tried=tried)
+
+
+def one_go_plan(grasp_plan, insert_plan, Tbc, q, Tbb, H, tool, plates=(), vel=60.0,
+                check_collision=True, max_waypoints=20):
     """(10/22 보스, opt-in --one_go) after the grasp: lift + carry + straight-down insert as ONE spline, then (after the
     release) ascend + home as one more.  -> (plan.json path, report) or (None, report)."""
     G, P = json.loads(Path(grasp_plan).read_text()), json.loads(Path(insert_plan).read_text())
@@ -853,18 +899,28 @@ def one_go_plan(grasp_plan, insert_plan, Tbc, q, Tbb, H, tool, plates=(), vel=60
     down = np.radians(P['legs']['descend']['waypoints_deg'])
     if np.degrees(np.abs(lift[-1] - carry[0]).max()) > 0.5 or np.degrees(np.abs(carry[-1] - down[0]).max()) > 0.5:
         return None, dict(why='legs do not join')
-    held, inserting, _ = quadrant_checkers(Tbc, q, Tbb, H, tool, plates=plates)
     head = np.vstack([lift, carry[1:k + 1]])
     tail = np.vstack([carry[k:], down[1:]])
     K, rep = None, {}
-    for every in (2, 1):                                     # 2 cm steps down if it stays straight, else 1 cm
-        K, rep = one_go_knots(head, tail, held, inserting, tail_every=every, n_down=(len(down) + every - 1) // every)
-        if K is not None:
-            break
+    if check_collision:
+        held, inserting, _ = quadrant_checkers(Tbc, q, Tbb, H, tool, plates=plates)
+        for every in (2, 1):                                 # 2 cm steps down if it stays straight, else 1 cm
+            K, rep = one_go_knots(head, tail, held, inserting, tail_every=every,
+                                  n_down=(len(down) + every - 1) // every)
+            if K is not None and len(K) <= max_waypoints:
+                break
+        if K is not None and len(K) > max_waypoints:
+            K = None
+    else:
+        K, rep = _unchecked_one_go_knots(head, tail, max_waypoints=max_waypoints)
+        rep.update(clear_held=None, clear_insert=None, down_off_vertical_mm=None,
+                   collision_check='skipped after grasp')
     old = len(lift) + len(carry) - 1
     if K is None:
-        return None, dict(rep, why='no thinned spline clears')
+        why = 'no thinned spline clears' if check_collision else f'cannot reduce to <= {max_waypoints} safe joint steps'
+        return None, dict(rep, why=why)
     up = P['legs']['ascend']['waypoints_deg'] + P['legs']['to_home']['waypoints_deg'][1:]
+    up = np.degrees(split_long_moves(np.radians(up), 40.0)).tolist()
     Kd = np.round(np.degrees(K), 3).tolist()
     rep.update(before_points=old + len(down) - 1, after_points=len(Kd),
                est_s=round(movesj_seconds(Kd, vel), 1),
@@ -1277,7 +1333,7 @@ def rrt_carry(held, floor, start, goal, seeds=(0, 1), max_wrist_deg=100.0, max_n
     raise RuntimeError(f'rrt carry {ends}: ' + '; '.join(errs[-2:]))
 
 
-def high_carry(kin, start, goal, cloud, z_low, ok_lim, step_m=0.02):
+def high_carry(kin, start, goal, cloud, z_low, ok_lim, step_m=0.02, sparse=False):
     """(10/18 보스: the plate hit the marker plates on a low carry) carry with the plate's lowest point never under `z_low`
     (base z, or a function of the plate points in base -> the floor there): straight up from `start`, across at that height, then straight down onto `goal` (the above pose, plate
     upright).  Across: the joint-space line between the two high poses (like the old straight carry), each point lifted
@@ -1289,9 +1345,13 @@ def high_carry(kin, start, goal, cloud, z_low, ok_lim, step_m=0.02):
     T0, T1 = kin.fk(start), kin.fk(goal)
     up0, up1 = max(0.0, need(T0) - low(T0)), max(0.0, need(T1) - low(T1))
 
+    cart_step = 0.15 if sparse else 0.01
+    joint_step_deg = 30.0 if sparse else 2.0
+    max_jump_deg = 40.0 if sparse else 8.0
+
     def vertical(T, d_from, d_to):
         out = []
-        for d in np.linspace(d_from, d_to, max(2, int(np.ceil(abs(d_to - d_from) / 0.01)) + 1))[1:]:
+        for d in np.linspace(d_from, d_to, max(2, int(np.ceil(abs(d_to - d_from) / cart_step)) + 1))[1:]:
             T_ = T.copy()
             T_[2, 3] += d
             out.append(T_)
@@ -1304,7 +1364,7 @@ def high_carry(kin, start, goal, cloud, z_low, ok_lim, step_m=0.02):
                 sol = kin.ik(T, prev)
             except RuntimeError:
                 raise RuntimeError(f'high carry: {what} ik') from None
-            if not ok_lim(sol) or np.degrees(np.abs(sol - prev)).max() > 8:
+            if not ok_lim(sol) or np.degrees(np.abs(sol - prev)).max() > max_jump_deg:
                 raise RuntimeError(f'high carry: {what} limit/flip')
             out.append(sol)
             prev = sol
@@ -1315,7 +1375,7 @@ def high_carry(kin, start, goal, cloud, z_low, ok_lim, step_m=0.02):
         p0, z0 = T0_[:3, 3], T0_[:3, 2]
         idx = [1, 2, 4]
         out, prev = [], q0
-        for d in np.linspace(0.0, up, max(2, int(np.ceil(up / 0.01)) + 1))[1:]:
+        for d in np.linspace(0.0, up, max(2, int(np.ceil(up / cart_step)) + 1))[1:]:
             def res(x):
                 q_ = q0.copy()
                 q_[idx] = x
@@ -1326,7 +1386,7 @@ def high_carry(kin, start, goal, cloud, z_low, ok_lim, step_m=0.02):
                 raise RuntimeError(f'high carry: {what} arm reach')
             sol = q0.copy()
             sol[idx] = fit.x
-            if not ok_lim(sol) or np.degrees(np.abs(sol - prev)).max() > 8:
+            if not ok_lim(sol) or np.degrees(np.abs(sol - prev)).max() > max_jump_deg:
                 raise RuntimeError(f'high carry: {what} arm limit')
             out.append(sol)
             prev = sol
@@ -1367,19 +1427,19 @@ def high_carry(kin, start, goal, cloud, z_low, ok_lim, step_m=0.02):
         return q_
 
     def raised_joint_line():                                 # the old carry's joint line, lifted where the plate would dip
-        n = max(2, int(np.ceil(np.degrees(np.abs(q_up1 - q_up0)).max() / 2.0)) + 1)
+        n = max(2, int(np.ceil(np.degrees(np.abs(q_up1 - q_up0)).max() / joint_step_deg)) + 1)
         out, prev, off = [], q_up0, np.zeros(6)
         for f in np.linspace(0, 1, n)[1:-1]:
             qi = q_up0 + (q_up1 - q_up0) * f
             T = kin.fk(qi)
             dz = need(T) - low(T)
             sol = lift_by_arm(qi, qi + off) if dz > 0 else qi
-            if not ok_lim(sol) or np.degrees(np.abs(sol - prev)).max() > 8:
+            if not ok_lim(sol) or np.degrees(np.abs(sol - prev)).max() > max_jump_deg:
                 raise RuntimeError(f'high carry: joint line limit/flip at {f:.2f} (+{dz:.3f} m, '
                                    f'J{int(np.argmax(np.abs(sol - prev))) + 1} {np.degrees(np.abs(sol - prev)).max():.0f} deg)')
             out.append(sol)
             prev, off = sol, sol - qi
-        if np.degrees(np.abs(q_up1 - prev)).max() > 8:
+        if np.degrees(np.abs(q_up1 - prev)).max() > max_jump_deg:
             raise RuntimeError('high carry: across limit/flip')
         return out
 
@@ -1387,13 +1447,14 @@ def high_carry(kin, start, goal, cloud, z_low, ok_lim, step_m=0.02):
         rots = Slerp([0, 1], Rotation.from_matrix([T0[:3, :3], T1[:3, :3]]))
         p0, p1 = T0[:3, 3] + [0, 0, up0], T1[:3, 3] + [0, 0, up1]
         poses = []
-        for f in np.linspace(0, 1, max(2, int(np.ceil(np.linalg.norm(p1 - p0) / step_m)) + 1))[1:-1]:
+        step = 0.15 if sparse else step_m
+        for f in np.linspace(0, 1, max(2, int(np.ceil(np.linalg.norm(p1 - p0) / step)) + 1))[1:-1]:
             T = np.eye(4)
             T[:3, :3], T[:3, 3] = rots(f).as_matrix(), p0 + (p1 - p0) * f
             T[2, 3] += max(0.0, need(T) - low(T))
             poses.append(T)
         out = chain(poses, q_up0, 'across')
-        if np.degrees(np.abs(q_up1 - (out[-1] if out else q_up0))).max() > 8:
+        if np.degrees(np.abs(q_up1 - (out[-1] if out else q_up0))).max() > max_jump_deg:
             raise RuntimeError('high carry: across limit/flip')
         return out
     try:
@@ -1432,7 +1493,10 @@ def quadrant_plan(Tbb, quadrant, gap, H, tool, start_deg, Tbc, q, grasp_legs=Non
     kin = Kinematics()
     lo, hi = np.array(ros2_nodes.joint_limits_deg()).T
     plates = [tuple(g) if isinstance(g, (tuple, list)) else (quadrant, int(g)) for g in plates]   # gap here or (model qd, gap)
-    held, inserting, free = quadrant_checkers(Tbc, q, Tbb, H, tool, plates=plates)
+    fast_unchecked = bool(q.get('_fast_unchecked_carry'))
+    held = inserting = free = None
+    if not fast_unchecked:
+        held, inserting, free = quadrant_checkers(Tbc, q, Tbb, H, tool, plates=plates)
     rise = q.get('basket_carry_rise_m')
     if rise is not None:                                     # (10/18 보스) carry floor: >= rise above the plate at the grasp,
         cloud = plate_cloud(H, tool)                         # clear of the marker blocks and of standing plates
@@ -1491,7 +1555,8 @@ def quadrant_plan(Tbb, quadrant, gap, H, tool, start_deg, Tbc, q, grasp_legs=Non
         Tp[:3, 3] = gap_b + v * centre_h / np.cos(t)
         T6 = Tp @ np.linalg.inv(H) @ np.linalg.inv(tool)
         down, prev = [], None
-        for lift in np.linspace(above_m, -extra, 13):        # above -> insert (+extra), ~1 cm steps
+        n_down = 4 if fast_unchecked else 13
+        for lift in np.linspace(above_m, -extra, n_down):    # sparse fast path, or legacy ~1 cm steps
             Tl = T6.copy()
             Tl[2, 3] += lift
             sol = None
@@ -1507,22 +1572,28 @@ def quadrant_plan(Tbb, quadrant, gap, H, tool, start_deg, Tbc, q, grasp_legs=Non
                 break
             down.append(sol)
             prev = sol
-        if len(down) < 13:
+        if len(down) < n_down:
             tried.append(((int(side), phi), 'ik/limit'))
             continue
-        c_ins = inserting.path_clearance(pp(np.array(down), 0.5))
-        if c_ins < 1.0:
-            tried.append(((int(side), phi), f'insert clearance {c_ins:.2f}'))
-            continue
+        c_ins = None
+        if not fast_unchecked:
+            c_ins = inserting.path_clearance(pp(np.array(down), 0.5))
+            if c_ins < 1.0:
+                tried.append(((int(side), phi), f'insert clearance {c_ins:.2f}'))
+                continue
         try:
             if rise is None:
-                carry, how = held.plan(np.radians(start_deg), down[0])
+                if fast_unchecked:
+                    carry, k, how = [np.radians(start_deg), down[0]], 0, 'direct sparse unchecked'
+                else:
+                    carry, how = held.plan(np.radians(start_deg), down[0])
             else:
                 try:
                     if q.get('basket_carry_mode', 'rule') == 'rrt':   # (10/19 18:0x 보스 'RRT써서 경로 찾게') RRT first
                         raise RuntimeError('carry mode rrt')
-                    carry, k = high_carry(kin, np.radians(start_deg), down[0], cloud, z_low, ok_lim)
-                    how = f'high {z_base:.3f}' + (f'/{z_top:.3f}' if stand else '')                    # straight down at the end: the insert check (standing plates beside)
+                    carry, k = high_carry(kin, np.radians(start_deg), down[0], cloud, z_low, ok_lim,
+                                          sparse=fast_unchecked)
+                    how = ('sparse unchecked ' if fast_unchecked else '') + f'high {z_base:.3f}' + (f'/{z_top:.3f}' if stand else '')
                 except RuntimeError as e_rule:              # (10/19 보스) the rule failed: RRT with the floor over the basket
                     if not (q.get('basket_carry_rrt_fallback', False) or q.get('basket_carry_mode') == 'rrt'):
                         raise
@@ -1605,44 +1676,53 @@ def quadrant_plan(Tbb, quadrant, gap, H, tool, start_deg, Tbc, q, grasp_legs=Non
                         how += f' +lift {len(pre)} cm'
                     carry = [np.asarray(c_) for c_ in top] + [np.asarray(c_) for c_ in drop[::-1][1:]]
                     k = len(top) - 1
-                thr = 1.0                                     # (10/19 night, opt-in start lift) never closer than the lifted
-                if q.get('basket_carry_start_lift_m', 0.0) > 0:   # start itself (it is already there), else the margin
-                    thr = min(1.0, max(0.5, held.clearance(np.asarray(carry[0]))) - 1e-6)   # never below half the margin
-                c_car = min(held.path_clearance(pp(np.array(carry[:k + 1]), 0.5)) / thr,
-                            inserting.path_clearance(pp(np.array(carry[k:]), 0.5)))
-                if c_car < 1.0:
-                    raise RuntimeError(f'high carry clearance {c_car:.2f}')
-                fl_ok = (lambda c, k_: fl.path_clearance(pp(np.array(c[:k_ + 1]), 0.5)) >= 1.0) if how.startswith(('rrt', 'prior', 'curobo')) \
-                    else (lambda c, k_: True)                 # (10/19 night) the even resample may cut a corner under the floor
-                clear_of = lambda c, k_: min(held.path_clearance(pp(np.array(c[:k_ + 1]), 0.5)) / thr,   # noqa: E731
-                                             inserting.path_clearance(pp(np.array(c[k_:]), 0.5))) if fl_ok(c, k_) else 0.0
-                ev, k_ev = even_carry(carry, k)               # (10/19 보스) evenly spaced, <= 60 points (movesj limit 100)
-                if clear_of(ev, k_ev) >= 1.0:
-                    carry, k = ev, k_ev
-                elif len(carry) > CARRY_MAX_WAYPOINTS:         # the even points cut a corner too close: the planned points,
-                    n_ = len(carry) - 1                        # thinned by index (before 10/19 14:2x)
-                    keep = np.unique(np.r_[np.linspace(0, k, max(2, CARRY_MAX_WAYPOINTS * k // n_)).round(),
-                                           np.linspace(k, n_, max(2, CARRY_MAX_WAYPOINTS * (n_ - k) // n_)).round()]).astype(int)
-                    carry, k = [carry[i] for i in keep], int(np.searchsorted(keep, k))
-                    c_car = clear_of(carry, k)
+                if fast_unchecked:
+                    c_car = None
+                else:
+                    thr = 1.0                                     # (10/19 night, opt-in start lift) never closer than the lifted
+                    if q.get('basket_carry_start_lift_m', 0.0) > 0:   # start itself (it is already there), else the margin
+                        thr = min(1.0, max(0.5, held.clearance(np.asarray(carry[0]))) - 1e-6)   # never below half the margin
+                    c_car = min(held.path_clearance(pp(np.array(carry[:k + 1]), 0.5)) / thr,
+                                inserting.path_clearance(pp(np.array(carry[k:]), 0.5)))
                     if c_car < 1.0:
-                        raise RuntimeError(f'high carry (thinned) clearance {c_car:.2f}')
-                if not fl_ok(carry, k):                       # (10/20 night) the RRT checks the floor every 2 deg; entering
-                    raise RuntimeError('rrt carry: under the floor between samples')   # the basket between two samples
-            home, how_h = free.plan(down[0], np.radians(HOME_JOINTS_DEG))          # could dip 7 mm: 0.5 deg check
+                        raise RuntimeError(f'high carry clearance {c_car:.2f}')
+                    fl_ok = (lambda c, k_: fl.path_clearance(pp(np.array(c[:k_ + 1]), 0.5)) >= 1.0) if how.startswith(('rrt', 'prior', 'curobo')) \
+                        else (lambda c, k_: True)                 # (10/19 night) the even resample may cut a corner under the floor
+                    clear_of = lambda c, k_: min(held.path_clearance(pp(np.array(c[:k_ + 1]), 0.5)) / thr,   # noqa: E731
+                                                 inserting.path_clearance(pp(np.array(c[k_:]), 0.5))) if fl_ok(c, k_) else 0.0
+                    ev, k_ev = even_carry(carry, k)               # (10/19 보스) evenly spaced, <= 60 points (movesj limit 100)
+                    if clear_of(ev, k_ev) >= 1.0:
+                        carry, k = ev, k_ev
+                    elif len(carry) > CARRY_MAX_WAYPOINTS:         # the even points cut a corner too close: the planned points,
+                        n_ = len(carry) - 1                        # thinned by index (before 10/19 14:2x)
+                        keep = np.unique(np.r_[np.linspace(0, k, max(2, CARRY_MAX_WAYPOINTS * k // n_)).round(),
+                                               np.linspace(k, n_, max(2, CARRY_MAX_WAYPOINTS * (n_ - k) // n_)).round()]).astype(int)
+                        carry, k = [carry[i] for i in keep], int(np.searchsorted(keep, k))
+                        c_car = clear_of(carry, k)
+                        if c_car < 1.0:
+                            raise RuntimeError(f'high carry (thinned) clearance {c_car:.2f}')
+                    if not fl_ok(carry, k):                       # (10/20 night) the RRT checks the floor every 2 deg; entering
+                        raise RuntimeError('rrt carry: under the floor between samples')   # the basket between two samples
+            if fast_unchecked:
+                home, how_h = [down[0], np.radians(HOME_JOINTS_DEG)], 'direct unchecked'
+            else:
+                home, how_h = free.plan(down[0], np.radians(HOME_JOINTS_DEG))      # could dip 7 mm: 0.5 deg check
         except RuntimeError as e:
             tried.append(((int(side), phi), str(e)))
             continue
         legs = dict(to_above=[np.degrees(w).tolist() for w in carry], descend=[np.degrees(w).tolist() for w in down],
                     ascend=[np.degrees(w).tolist() for w in down[::-1]], to_home=[np.degrees(w).tolist() for w in home],
-                    abort_home=[np.degrees(w).tolist() for w in free.plan(down[0], np.radians(HOME_JOINTS_DEG))[0]])
+                    abort_home=([np.degrees(w).tolist() for w in home] if fast_unchecked else
+                                [np.degrees(w).tolist() for w in free.plan(down[0], np.radians(HOME_JOINTS_DEG))[0]]))
         if grasp_legs:
             legs = dict(grasp_legs, **legs)
-        path = taught_plan(legs, Tbc, q, f'quadrant {quadrant} gap {gap + 1}')
+        path = (unchecked_sparse_plan(legs, f'quadrant {quadrant} gap {gap + 1} sparse unchecked post-grasp')
+                if fast_unchecked else taught_plan(legs, Tbc, q, f'quadrant {quadrant} gap {gap + 1}'))
         plan = json.loads(Path(path).read_text())
         rep = dict(quadrant=quadrant, gap=gap + 1, phi_deg=phi, face=int(side), drop_start=None if rise is None else int(k), y_shift_m=round(y_shift_m, 4), x_shift_m=round(x_shift_m, 4), carry=how, home=how_h, tried=tried, accepted=plan['accepted'],
-                   clearance_ratio=dict(carry=round(held.path_clearance(pp(np.array(carry), 0.5)) if rise is None else c_car, 2), insert=round(c_ins, 2),
-                                        after=round(free.path_clearance(pp(np.array(home), 0.5)), 2)))
+                   clearance_ratio=(dict(carry=None, insert=None, after=None) if fast_unchecked else
+                                    dict(carry=round(held.path_clearance(pp(np.array(carry), 0.5)) if rise is None else c_car, 2),
+                                         insert=round(c_ins, 2), after=round(free.path_clearance(pp(np.array(home), 0.5)), 2))))
         plan.update(basket_T=np.asarray(Tbb).tolist(), plate_in_tcp=np.asarray(H).tolist(), quadrant_plan=rep)
         Path(path).write_text(json.dumps(plan, indent=1))
         return path, rep

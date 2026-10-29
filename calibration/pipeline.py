@@ -485,13 +485,15 @@ def plate_cfg(policy):
 def configure_carry_planner(q, name=None):
     """Apply the selected carry backend to this run-local config.
 
-    ``direct`` means a fresh geometric rise/across/drop solve only: no saved
-    carry prior and no RRT fallback.  Collision checking remains mandatory.
+    ``direct`` means the sparse post-grasp path requested on 10/29: no saved
+    carry prior, no RRT, and no FK collision sweep after the grasp.  The mover
+    still enforces joint limits and maximum knot-to-knot joint motion.
     """
     name = (os.environ.get('CARRY_PLANNER', '') if name is None else name).strip().lower()
     if name == 'direct':
         q['basket_carry_mode'] = 'rule'
         q['basket_carry_rrt_fallback'] = False
+        q['_fast_unchecked_carry'] = True
         q.pop('_carry_prior', None)
     return name
 
@@ -1217,8 +1219,8 @@ def run_plate(args):
             if continuous_direct and not direct_carry:
                 raise RuntimeError('CARRY_CONTINUOUS=1 requires CARRY_PLANNER=direct')
             if direct_carry:
-                print('   운반 순서: 현재 관측값으로 rise -> across -> drop 즉석 계산 '
-                      '(저장 경로 없음, RRT 없음, 충돌검사 유지)', flush=True)
+                print('   운반 순서: 현재 관측값으로 sparse rise -> across -> drop 즉석 계산 '
+                      '(저장 경로/RRT/파지 후 충돌검사 없음)', flush=True)
             if continuous_direct:
                 print('   연속 운반: 파지 전에 검증한 lift + carry를 한 spline으로 실행 '
                       '(파지 후 3초 정지/FP 재측정/경로 재계산 없음)', flush=True)
@@ -1317,17 +1319,20 @@ def run_plate(args):
                 pc = qs['policy_correction']
                 print(f'   삽입 정책 보정 (파지 전 손 모델): dx {pc["dx_m"]:+.4f} m, dy {pc["dy_m"]:+.4f} m, lean {pc["lean"]:+.3f}, '
                       f'dz {pc["dz_m"]:+.4f} m, yaw {pc["yaw_deg"]:+.2f} deg', flush=True)
-            if args.one_go:                                 # (10/22 보스) after the grasp: go, no stop until the release
-                if not (continuous_direct and args.auto):
-                    raise RuntimeError('--one_go needs --auto and the continuous direct carry (CARRY_PLANNER=direct, CARRY_CONTINUOUS=1)')
+            fast_one_go = bool(continuous_direct and direct_carry)
+            if args.one_go or fast_one_go:                  # (10/29 보스) after the grasp: always one <=20-knot spline
+                if not continuous_direct:
+                    raise RuntimeError('--one_go needs the continuous direct carry (CARRY_PLANNER=direct, CARRY_CONTINUOUS=1)')
                 from plate_plans import one_go_plan
                 t_og = time.monotonic()
                 one_go, rep_og = one_go_plan(plan, early, Tbc, q, basket_T, qs['H'], qs['tool'], plates,
-                                             vel=args.vel_deg_s or q.get('vel_deg_s', 2.0))
+                                             vel=args.vel_deg_s or q.get('vel_deg_s', 2.0),
+                                             check_collision=not fast_one_go, max_waypoints=20)
                 if one_go is None:
                     raise RuntimeError(f'--one_go: no single spline clears ({rep_og.get("why")}, {rep_og.get("tried", [])[-1:]})')
-                print(f'   한 번에 가기: 파지 후 {rep_og["before_points"]} -> {rep_og["after_points"]} 점, 충돌 여유 '
-                      f'운반 {rep_og["clear_held"]} / 넣기 {rep_og["clear_insert"]}, 넣기 수직 벗어남 {rep_og["down_off_vertical_mm"]} mm, '
+                print(f'   한 번에 가기: 파지 후 {rep_og["before_points"]} -> {rep_og["after_points"]} 점, 충돌검사 '
+                      f'{rep_og.get("collision_check", "수행")}, 운반 {rep_og.get("clear_held")} / 넣기 {rep_og.get("clear_insert")}, '
+                      f'넣기 수직 벗어남 {rep_og.get("down_off_vertical_mm")} mm, '
                       f'예상 {rep_og["est_s"]} s (지금 방식 {rep_og["est_s_before"]} s + 사진) [{time.monotonic() - t_og:.1f} s] {one_go}', flush=True)
             both = json.loads(Path(plan).read_text())
             both['legs'].update(json.loads(early.read_text())['legs'])
@@ -1872,8 +1877,8 @@ def parse_args(argv=None):
     p.add_argument('--auto', action='store_true', help='plate: no Human answers after the opening phrase: gripper '
                    'closes at the grasp pose (if FP says the plate did not move) and opens at the insert; stops go on')
     p.add_argument('--one_go', action='store_true',
-                   help='(10/22 보스, opt-in) --insert quadrant --auto: after the grasp lift + carry + straight-down insert as ONE '
-                        'spline (thinned to ~20 points, re-checked as the movesj curve), release, then ascend + home as one')
+                   help='legacy explicit request; direct continuous quadrant placement now automatically runs post-grasp '
+                        'lift + carry + insert as one <=20-waypoint spline without the post-grasp collision sweep')
     p.add_argument('--markers_off', action='store_true',
                    help='(10/22 보스: 마커 뗌, opt-in) the marker blocks are off the basket rim: drop them from the collision model '
                         '(they blocked Q3 pins 4-6)')

@@ -5589,3 +5589,13 @@ plate 삽입 +y 5 cm, 손목 회전 30–45° 이내, 오늘 밤 sim에서 핸�
 ### 2026-10-29 10:48 Codex — 관객 화면 RGB-D share 출력 (`9ab8280`)
 - 실행 명령: `DISPLAY=:1 ~/miniconda3/envs/foundationpose/bin/python -u calibration/demo_watch.py --detect_only --camera fixed --audience --write_share --T_base_cam calibration/data/real_handeye/20261016_134701_fromwrist_drop3/T_base_cam_pnp.json --basket /tmp/demo_audience_basket_20261029_104235.json --imgsz 512 --half --zoom 2.0`.
 - share 갱신: 카메라에서 읽어 YOLOE로 처리하는 **매 프레임**마다 `/dev/shm/fixed_latest.npz`를 `fixed_latest.tmp.npz` → rename으로 원자 교체한다. 형식은 `rgb`, m 단위 `depth`, `K`, Unix 초 `t`; 현재 관객 화면 실측 처리율은 약 16.5 fps라 같은 조건의 예상 갱신 주기도 약 0.061 s이다. 이번 heartbeat에서는 실행 중 화면을 재시작하지 않고 writer→`tesollo/fixed_frames.py` 소비 smoke와 calibration 회귀 **108/108**만 확인했다.
+
+## 2026-10-29 오전 (Claude) — Tesollo 시연 시퀀스 (보스 실기와 함께)
+- 0ff716c `--wrist_less 45`(sdk 기본 45): 평평한 접시 가정으로 손 회전 93° → 48°, 하강 충돌 검사 통과.
+- a7bfc23 mover 'start' 대신 Enter, 오타는 다시 묻기; sdk 단계 안의 구간은 확인 없이 연속(`--leg_enter` = 예전).
+- 6f39a6e `holding> basket` = 빈 분면 자동(`tesollo/empty_quadrant.py`, 시작 시 고정카메라) + 넣은 것 기억(`/tmp/tesollo_demo_state.json`, `--new_demo`): bowl 아무 빈 칸, plate 첫째 앞(6) 둘째 뒤(12).
+- 6ab1aef 관객 화면이 카메라를 쥐고 있으면 핸드 도구(basket_vision/perceive/empty_quadrant)는 `/dev/shm/fixed_latest.npz` share를 읽음 (Codex 9ab8280 `--write_share`).
+- 912c308/d87fd9b `--teach`: 슬롯 위 운반 높이에서 멈춤(처음엔 운반 끝 수직 하강까지 가서 보스 지적 → 수정), Enter로 관절 기록 → `tesollo/taught_inserts.json`.
+- 453e80d `--gripper_path`: 그리퍼 플래너를 지금 바구니로 돌려 관절 경로 + 손목 오프셋. **발견: 10/29 바구니 (0.974, −0.096)는 그리퍼 시연 때보다 +y 11 cm, 그리퍼 플래너도 Q3:6 경로 없음(−y 6 cm 이상이면 있음).**
+- f70b5ab `--taught`: 보스 티칭(11:17 Q3 핀 6) teach1 바구니 위 [−6.184, 12.193, 81.003, −8.685, 29.372, −84.009], teach2 슬롯 1 cm 위 [−2.403, 30.974, 74.722, −13.836, 30.217, −91.829], teach3 슬롯 [−2.403, 35.184, 74.722, −13.836, 30.217, −91.829] → lift→1 한 스플라인, 1→2→3, 복귀 3→2→1→홈; 바구니 이동 시 바구니 좌표로 IK. mover 검사 전 구간 OK, 실기 전.
+- 관절 기록(읽기 전용) `tesollo/teach_log_20261029_110607.jsonl`.

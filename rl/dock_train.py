@@ -151,7 +151,7 @@ def evaluate_details(name, net, episodes, seed, env_kwargs):
 
 @torch.no_grad()
 def pitch_reachability(episodes=4096,seed=41024):
-    env=DockEnv(episodes,seed=seed); env.reset(); env.t.fill_(env.steps-1)
+    env=DockEnv(episodes,seed=seed); env.reset(); env.t.fill_(env.path_steps-1)
     minimum=torch.full((episodes,),float('inf'),device='cuda')
     for deg in torch.linspace(-15,15,61,device='cuda'):
         env.residual[:,2]=torch.deg2rad(deg)
@@ -159,6 +159,29 @@ def pitch_reachability(episodes=4096,seed=41024):
     return dict(n=episodes,pass_angle_reachable=float((minimum<math.radians(20)).float().mean()),
                 median_min_angle_deg=float(minimum.median()*180/math.pi),
                 p90_min_angle_deg=float(torch.quantile(minimum,.9)*180/math.pi))
+
+
+@torch.no_grad()
+def export_physics_trajectories(net, prefix, episodes=1024, seed=51024):
+    """Export matched P/PPO residual paths for hand_basket.py physics replay."""
+    prefix=Path(prefix); prefix.parent.mkdir(parents=True,exist_ok=True)
+    kwargs=dict(basket_xy_mm=0,basket_yaw_deg=0,pitch_frac=0,lean_deg=0)
+    outputs=[]
+    for method in ('p','ppo'):
+        env=DockEnv(episodes,seed=seed,**kwargs); obs=env.reset()
+        residual=torch.zeros(episodes,env.path_steps,3,device='cuda')
+        residual[:,0]=env.residual
+        for _ in range(env.steps-1):
+            action=net.deterministic(obs) if method=='ppo' else controller(obs,'p')
+            obs,_,_,_=env.step(action)
+            residual[torch.arange(episodes,device='cuda'),env.t]=env.residual
+        path=prefix.with_name(prefix.name+f'_{method}.npz')
+        np.savez_compressed(path,method=method,seed=seed,job=env.job.cpu().numpy(),
+                            H=env.H.cpu().numpy(),residual=residual.cpu().numpy(),
+                            names=np.array([f'Q3_job_{i}' for i in range(len(env.paths))]),
+                            env_kwargs=json.dumps(kwargs))
+        outputs.append(str(path))
+    return outputs
 
 
 def report(net, logs, out, episodes=1024, seed=1024):
@@ -194,11 +217,14 @@ def main():
     p.add_argument('--clip',type=float,default=.2); p.add_argument('--vf',type=float,default=.5); p.add_argument('--ent',type=float,default=.002)
     p.add_argument('--eval_every',type=int,default=2); p.add_argument('--seed',type=int,default=0)
     p.add_argument('--checkpoint',default=''); p.add_argument('--eval_only',action='store_true')
+    p.add_argument('--export_physics',default='',help='prefix for matched _p.npz and _ppo.npz replay bundles')
     a=p.parse_args(); out=Path(a.out); out.mkdir(parents=True,exist_ok=True)
     if a.eval_only:
         net=ActorCritic(DockEnv.obs_dim,DockEnv.act_dim).cuda(); net.load_state_dict(torch.load(a.checkpoint,map_location='cuda',weights_only=True)); logs=[]
     else: net,logs=train(a)
     report(net,logs,out)
+    if a.export_physics:
+        print(json.dumps(dict(physics_trajectories=export_physics_trajectories(net,a.export_physics)),indent=1))
 
 
 if __name__=='__main__': main()

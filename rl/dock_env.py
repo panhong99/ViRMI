@@ -45,18 +45,19 @@ class DockEnv:
     obs_dim = 9
     act_dim = 3
 
-    def __init__(self, num_envs=2048, steps=48, device="cuda:0", seed=0,
+    def __init__(self, num_envs=2048, steps=48, hover_steps=16, device="cuda:0", seed=0,
                  job=DEFAULT_JOB, camera=DEFAULT_CAMERA, hang_deg=15.0,
                  grip_mm=15.0, tilt_deg=3.0, basket_xy_mm=10.0,
-                 basket_yaw_deg=1.0):
+                 basket_yaw_deg=1.0, pitch_frac=0.05, lean_deg=3.0):
         self.device = torch.device(device)
-        self.n, self.steps = int(num_envs), int(steps)
+        self.n, self.path_steps, self.hover_steps = int(num_envs), int(steps), int(hover_steps)
+        self.steps = self.path_steps + self.hover_steps
         self.gen = torch.Generator(device=self.device).manual_seed(int(seed))
         J = np.load(job)
         names = [str(x) for x in J["names"]]
         keep = np.array(["Q3" in x for x in names])
         paths = np.split(J["flange"], np.cumsum(J["flange_len"])[:-1])
-        paths = [_resample_pose(p, self.steps) for p, k in zip(paths, keep) if k]
+        paths = [_resample_pose(p, self.path_steps) for p, k in zip(paths, keep) if k]
         self.paths = torch.tensor(np.stack(paths), dtype=torch.float32, device=self.device)
         self.job_gap = torch.tensor(J["gap"][keep], dtype=torch.long, device=self.device)
         gaps = np.split(J["gaps_b"], np.cumsum(J["gaps_len"])[:-1])
@@ -79,6 +80,7 @@ class DockEnv:
         self.plate_r = 0.134
         self.hang_deg, self.grip_m, self.tilt_deg = float(hang_deg), float(grip_mm) / 1000, float(tilt_deg)
         self.basket_xy_m, self.basket_yaw_deg = float(basket_xy_mm) / 1000, float(basket_yaw_deg)
+        self.pitch_frac, self.lean_deg = float(pitch_frac), float(lean_deg)
         self.action_scale = torch.tensor([0.002, 0.002, math.radians(1.0)], device=self.device)
         self.residual_limit = torch.tensor([0.080, 0.080, math.radians(15.0)], device=self.device)
         th = torch.linspace(0, 2 * math.pi, 17, device=self.device)[:-1]
@@ -90,6 +92,7 @@ class DockEnv:
         n, d = self.n, self.device
         self.job = torch.zeros(n, dtype=torch.long, device=d)
         self.t = torch.zeros(n, dtype=torch.long, device=d)
+        self.phase = torch.zeros(n, dtype=torch.long, device=d)
         self.residual = torch.zeros(n, 3, device=d)
         self.prev_action = torch.zeros(n, 3, device=d)
         self.Tbb = torch.eye(4, device=d).repeat(n, 1, 1)
@@ -108,7 +111,7 @@ class DockEnv:
     def reset(self):
         n, d = self.n, self.device
         self.job = torch.randint(len(self.paths), (n,), generator=self.gen, device=d)
-        self.t.zero_(); self.residual.zero_(); self.prev_action.zero_(); self.band_valid.zero_()
+        self.t.zero_(); self.phase.zero_(); self.residual.zero_(); self.prev_action.zero_(); self.band_valid.zero_()
         self.terminated.zero_(); self.terminal_success.zero_()
         # In-hand uncertainty: hang +/-15 deg, translation each axis +/-15 mm, small tilt +/-3 deg.
         Rh = _axis_angle(self.hang_axis.expand(n, -1), self._uniform((n,), -math.radians(self.hang_deg), math.radians(self.hang_deg)))
@@ -124,19 +127,21 @@ class DockEnv:
         self.Tbb = self.Tbb0.repeat(n, 1, 1)
         self.Tbb[:, :3, :3] = Rz @ self.Tbb[:, :3, :3]
         self.Tbb[:, :2, 3] += self._uniform((n, 2), -self.basket_xy_m, self.basket_xy_m)
-        self.pitch = self.pitch0 * self._uniform((n,), 0.95, 1.05)
-        self.lean = self.lean0 + self._uniform((n,), -math.radians(3), math.radians(3))
+        self.pitch = self.pitch0 * self._uniform((n,), 1-self.pitch_frac, 1+self.pitch_frac)
+        self.lean = self.lean0 + self._uniform((n,), -math.radians(self.lean_deg), math.radians(self.lean_deg))
         return self._observe()
 
-    def _plate_pose(self):
-        ids = torch.arange(self.n, device=self.device)
-        P = self.paths[self.job, self.t] @ self.H
+    def _plate_pose_at(self, path_index):
+        P = self.paths[self.job, path_index] @ self.H
         # Basket-frame translation residual, and a small pitch about basket y at the plate centre.
         shift = (self.Tbb[:, :3, :3] @ torch.cat((self.residual[:, :2], torch.zeros(self.n, 1, device=self.device)), 1)[..., None]).squeeze(-1)
         P[:, :3, 3] += shift
         Ry = _axis_angle(self.Tbb[:, :3, 1], self.residual[:, 2])
         P[:, :3, :3] = Ry @ P[:, :3, :3]
         return P
+
+    def _plate_pose(self):
+        return self._plate_pose_at(self.t)
 
     def _bottom(self, P):
         normal = P[:, :3, 2]
@@ -183,7 +188,17 @@ class DockEnv:
 
     def _observe(self):
         P, bottom, normal, bottom_b, root_x, yc, band3 = self._geometry()
-        uv = self._project(torch.cat((band3, bottom[:, None]), 1))
+        # Compare in one depth plane.  Above the tine tips, directly comparing
+        # the high plate rim with the clamped tip-height band creates a camera
+        # parallax error that points the controller the wrong way.  Project the
+        # rim along the known nominal descent direction to the current band
+        # height; below the tips the point is already in that plane.
+        band0_b = (self.Tbb[:, :3, :3].transpose(1, 2) @
+                   (band3[:, 0] - self.Tbb[:, :3, 3])[..., None]).squeeze(-1)
+        projected_b = bottom_b.clone()
+        projected_b[:, 2] = torch.minimum(bottom_b[:, 2], band0_b[:, 2])
+        compare_bottom = (self.Tbb[:, :3, :3] @ projected_b[..., None]).squeeze(-1) + self.Tbb[:, :3, 3]
+        uv = self._project(torch.cat((band3, compare_bottom[:, None]), 1))
         # CNN-level point noise. Hold the last complete band on a 5% miss.
         uv[:, :4] += torch.randn(self.n, 4, 2, generator=self.gen, device=self.device) * 2.0
         centre = uv[:, :4].mean(1)
@@ -215,7 +230,7 @@ class DockEnv:
                            (major * across).sum(1))
         tilt += torch.randn(self.n, generator=self.gen, device=self.device) * math.radians(1.0)
         tilt_error = tilt - math.radians(-6.0)
-        remaining = 1.0 - self.t.float() / (self.steps - 1)
+        remaining = 1.0 - self.phase.float() / (self.steps - 1)
         low = (bottom_b[:, 2] - self.floor_z) / 0.15
         return torch.stack((err_along, err_across, tilt_error / math.radians(20), remaining, low,
                             self.prev_action[:, 0], self.prev_action[:, 1], self.prev_action[:, 2],
@@ -225,14 +240,17 @@ class DockEnv:
         action = action.clamp(-1, 1)
         active = ~self.terminated
         old_action = self.prev_action.clone()
-        remaining = 1.0 - self.t.float() / (self.steps - 1)
+        remaining = 1.0 - self.phase.float() / (self.steps - 1)
         taper = 0.25 + 0.75 * remaining
         scale = self.action_scale[None] * taper[:, None]
         candidate = self.residual + action * scale
         candidate = torch.maximum(torch.minimum(candidate, self.residual_limit), -self.residual_limit)
         self.residual[active] = candidate[active]
         self.prev_action[active] = action[active]
-        self.t[active] += 1
+        self.phase[active] += 1
+        advance = active & (self.phase > self.hover_steps)
+        self.t[advance] = torch.minimum(self.t[advance] + 1,
+                                        torch.full_like(self.t[advance], self.path_steps - 1))
         obs = self._observe()
         e, ey, tilt = obs[:, 0], obs[:, 1], obs[:, 2]
         inside = e.abs() <= 0.5
@@ -241,7 +259,7 @@ class DockEnv:
         reward += inside.float() * (0.2 + 0.8 * (1.0 - obs[:, 3]))
         reward -= (e.abs() > 1.0).float() * 2.0
         contact = active & height_ok
-        timeout = active & (self.t >= self.steps - 1)
+        timeout = active & (self.phase >= self.steps - 1)
         newly_done = contact | timeout
         success = self.success()
         self.terminal_success[newly_done] = success[newly_done]
@@ -280,7 +298,7 @@ def controller(obs, mode="p"):
     # do not integrate saturated image-y noise. Positive pitch reduces the
     # measured normal error for this Q3 camera/hand convention.
     a[:, 1] = 0.0
-    a[:, 2] = -0.80 * obs[:, 2]
+    a[:, 2] = -0.50 * obs[:, 2]
     return a.clamp(-1, 1)
 
 

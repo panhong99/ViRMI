@@ -5668,3 +5668,16 @@ plate 삽입 +y 5 cm, 손목 회전 30–45° 이내, 오늘 밤 sim에서 핸�
 - 접시 밑면이 floor를 통과하던 문제는 floor에서 pose를 clamp하고 최초 contact에서 episode를 종료하도록 수정했다. strict 높이 판정도 floor +2 mm로 바꿨다. 행동 축은 요구사항의 dx/dy/pitch 3개를 유지했다. pitch ±15°만으로 angle<20°에 도달 가능한 표본은 **81.23%**, 최선 각도 중앙값 7.01°, p90 25.64°여서 나머지 18.77%는 현재 행동 축으로 교정 불가다.
 - 동일 seed1024, 1024회 wide(행 ±15°, grip ±15 mm, tilt ±3°, basket ±1 cm/±1°): fixed **3.32%**, P **19.63%**, PPO **17.68%**. narrow(행 ±5°, grip ±5 mm, tilt ±2°, basket 고정): fixed **0%**, P **35.74%**, PPO **30.86%**. narrow P는 Claude의 CEM 37%와 비슷한 범위다. PPO는 P보다 낮아 배포 후보로 채택하지 않는다.
 - 기준별 wide P 통과율은 x 30.57%, y 95.90%, contact-height 63.87%, angle 78.22%; 병목은 x와 접촉 높이다. 전체 표·Wilson CI·학습곡선: `outputs/dock_rl_20261030/ppo_review_v4/`. 다음은 같은 P/PPO trajectory를 `rl/hand_basket.py` Isaac settle에 넣어 운동학 성공이 물리 안착으로 이어지는지 비교한다. 실로봇·카메라·ROS는 실행하지 않았다.
+
+### 2026-10-29 23:1x Codex — CT 측면 시차 보정·정렬 hover·Isaac 완료
+- Claude `93c2245` 리뷰의 핵심인 높이 차 시차를 수정했다. 접시 밑면의 basket x/y는 유지하고 z만 목표 띠 높이까지 투영한 비교점을 카메라에 넣어, tip 위에서 잘못된 방향으로 누적되던 줄 방향 오차를 제거했다. taught path 48 step 전에는 같은 시작 pose에서 residual만 맞추는 **16-step hover**를 추가했다.
+- 새 PPO `outputs/dock_rl_20261030/ppo_hover_v5/`: run_v9 계열이 아니라 CT 운동학 residual 정책을 fresh train, 60 updates·BC 25·약 7.74M env steps. 같은 seed1024 wide fixed/P/PPO **3.32/34.18/33.98%**, narrow **0/47.46/46.39%**. P와 PPO CI가 겹쳐 PPO 우위를 주장하지 않는다.
+- 물리와 정확히 맞춘 seed51024, basket pose/pitch/lean 고정, 같은 H 1024개 운동학: fixed **23/1024 = 2.25% [1.50, 3.35]**, P **346/1024 = 33.79% [30.96, 36.74]**, PPO **347/1024 = 33.89% [31.05, 36.84]**.
+- `dock_train.py --export_physics`가 P/PPO별 job·H·48-step residual을 별도 NPZ로 저장하고, `hand_basket.py --dock_traj`가 각 경로 knot에 basket-frame dx/dy/pitch를 적용한다. 기존 기본 eval/CEM 경로는 바꾸지 않았다.
+- **순차 Isaac PhysX settle**(같은 seed51024/H 1024개): P **284/1024 = 27.73% [25.08, 30.56]**, PPO **253/1024 = 24.71% [22.16, 27.44]**. 운동학에서는 동률이고 물리에서는 P가 높아 **P controller를 선택하고 PPO는 미채택**한다. 결과 `outputs/dock_rl_20261030/{summary.json,comparison_all.tsv,physics_export_v2/isaac_{p,ppo}_seq.json}`.
+- 실행 명령:
+  - 학습: `~/miniconda3/envs/foundationpose/bin/python rl/dock_train.py --out outputs/dock_rl_20261030/ppo_hover_v5 --updates 60 --bc_steps 25`
+  - export: `~/miniconda3/envs/foundationpose/bin/python rl/dock_train.py --out outputs/dock_rl_20261030/ppo_hover_v5 --eval_only --checkpoint outputs/dock_rl_20261030/ppo_hover_v5/best.pt --export_physics outputs/dock_rl_20261030/physics_export_v2/dock_seed51024`
+  - physics: `DISPLAY=:1 env -u CONDA_PREFIX -u CONDA_DEFAULT_ENV /home/pan/IsaacLab/isaaclab.sh -p rl/hand_basket.py eval --job rl/logs/hand_basket/job_taught_1029_cal.npz --dock_traj <P_OR_PPO_NPZ> --out <JSON> --settle_s 2`
+- 복구 기록: 첫 P/PPO 물리 실행을 실수로 동시에 시작해 GPU 실험 단일 실행 규칙을 어겼으므로 그 결과는 폐기했다. 이후 프로세스/GPU가 빈 것을 확인하고 P→PPO를 순차 재실행했다. 첫 순차 P 시작은 X display 초기화에서 실패했고 `DISPLAY=:1`을 명시해 복구했다. 최종 보고 수치는 순차 재실행 JSON만 사용한다.
+- 한계: Q3 모델·측면 카메라에 한정된 sim/Isaac 결과이고 실사진 도킹 및 실로봇 성공률이 아니다. 접시를 든 측면 실사진에서 밑면 mask/띠 관측이 유지되는지 별도 검증이 필요하다. 실로봇·손·카메라·ROS는 실행하지 않았다.

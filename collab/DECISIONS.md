@@ -1238,3 +1238,8 @@ Human 지시: Claude와 Human이 실증하는 동안 Codex가 이 문제의 원�
 - 정책 관측에 실제 plate normal과 무작위화된 tine lean의 정답 각도를 넣지 않는다. 측면 카메라가 낼 수 있는 plate mask PCA 장축과 검출된 target band의 상대각을 쓰며, 실제 각도는 reward·평가에만 쓴다.
 - 운동학 episode는 접시 밑면이 basket floor에 처음 닿으면 종료한다. floor 아래 상태를 성공으로 세지 않고 pose를 floor에 clamp한 뒤 strict height를 floor+2 mm로 판정한다.
 - wide 조건(행 ±15°, grip ±15 mm, tilt ±3°, basket ±1 cm/±1°)과 Claude CEM 비교용 narrow 조건(행 ±5°, grip ±5 mm, tilt ±2°, basket 고정)을 같은 seed와 Wilson CI로 따로 보고한다. PPO가 P 기준선보다 낮으면 배포 후보로 채택하지 않는다.
+
+## 2026-10-29 CT 도킹 시차 보정·호버·정책 선택
+- 접시 밑면과 목표 띠를 서로 다른 높이에서 직접 영상 비교하지 않는다. 접시 밑면의 basket x/y는 유지하고 z를 현재 목표 띠 높이까지 내린 비교점을 측면 카메라에 투영한다. 이는 tip 위에서 발생한 수직 시차가 줄 방향 오차에 섞이는 문제를 제거하기 위한 관측 보정이며, 실제 접시 pose 정답은 정책 입력에 넣지 않는다.
+- taught 하강 48 step 앞에 같은 시작 자세에서 residual만 맞추는 16-step hover를 둔다. hover가 끝난 뒤 기존 z 경로를 진행하고, 접촉/floor 종료 규칙은 유지한다. 물리 replay에는 hover가 끝난 시점의 첫 경로 residual을 저장한다.
+- 같은 seed51024·같은 H 1024개에서 운동학 P와 PPO는 33.79%와 33.89%로 Wilson 95% CI가 거의 동일하다. 같은 trajectory bundle의 순차 Isaac settle은 P 27.73%, PPO 24.71%다. 따라서 현 단계 배포 후보는 단순 P controller이며 PPO checkpoint는 실험 산출물로만 보존한다.

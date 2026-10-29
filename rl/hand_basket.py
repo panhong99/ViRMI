@@ -48,6 +48,7 @@ def parse():
     p.add_argument('--viewer', action='store_true')
     p.add_argument('--hand', action='store_true', help='opt-in M1013 + DG-5F-S collision replay (job must contain arm_q)')
     p.add_argument('--hand_contact_n', type=float, default=1.0, help='hand-basket contact threshold [N]')
+    p.add_argument('--dock_traj', default='', help='eval: dock_train.py exported residual trajectory bundle')
     return p.parse_args()
 
 
@@ -80,8 +81,11 @@ def main():
     gaps_b = np.split(J['gaps_b'], np.cumsum(J['gaps_len'])[:-1])
     tool, H_nom, ax, Tbb = J['tool'], J['H_nom'], J['hang_axis'], J['Tbb']
     nj = len(names)
+    dock = np.load(a.dock_traj) if a.dock_traj else None
+    if dock is not None and (a.mode != 'eval' or a.corr):
+        raise SystemExit('--dock_traj is eval-only and cannot be combined with --corr')
     per = a.reps if a.mode == 'eval' else a.pop * a.reps
-    N = nj * per
+    N = len(dock['job']) if dock is not None else nj * per
     C = yaml.safe_load((RL / 'config.yaml').read_text())
     usd = be.full_basket_usd_path(be.marker_blocks_enabled())
     if not Path(usd).exists():
@@ -165,7 +169,7 @@ def main():
             out.append(Tg @ Rh @ Rt @ H_nom)
         return np.array(out)
 
-    def rollout(job_of, corr, Hs):
+    def rollout(job_of, corr, Hs, dock_residual=None):
         """job index, correction (dx, dy, dz basket frame) and H per env -> success (N,) and landed info."""
         L = max(len(flange[j]) for j in range(nj))
         step = np.array([np.linalg.norm(flange[j][1][:3, 3] - flange[j][0][:3, 3]) for j in range(nj)])
@@ -175,8 +179,17 @@ def main():
         for e in range(N):
             j = job_of[e]
             F = flange[j].copy()
-            F[:, :3, 3] += shift_base[e]
-            P = F @ tool @ Hs[e] @ root_off
+            centre_path = F @ tool @ Hs[e]
+            if dock_residual is None:
+                centre_path[:, :3, 3] += shift_base[e]
+            else:
+                old = np.linspace(0, 1, dock_residual.shape[1])
+                new = np.linspace(0, 1, len(F))
+                rr = np.stack([np.interp(new, old, dock_residual[e, :, k]) for k in range(3)], 1)
+                centre_path[:, :3, 3] += (Tbb[:3, :3] @ np.c_[rr[:, :2], np.zeros(len(rr))].T).T
+                for k in range(len(centre_path)):
+                    centre_path[k, :3, :3] = R.from_rotvec(Tbb[:3, 1] * rr[k, 2]).as_matrix() @ centre_path[k, :3, :3]
+            P = centre_path @ root_off
             P = np.concatenate([P, np.repeat(P[-1:], L - len(P), 0)])
             poses[e, :, :3] = P[:, :3, 3] + org[e]
             qx = R.from_matrix(P[:, :3, :3]).as_quat()
@@ -283,22 +296,24 @@ def main():
     if a.mode == 'eval':
         corr_d = json.loads(Path(a.corr).read_text()) if a.corr else {}
         corr_d = corr_d.get('corr', corr_d)                      # a cem output file or a bare {pin: [dx, dy, dz]}
-        job_of = np.repeat(np.arange(nj), per)
+        job_of = dock['job'].astype(int) if dock is not None else np.repeat(np.arange(nj), per)
         corr = np.array([corr_d.get(names[j], [0.0, 0.0, 0.0]) for j in job_of], float)
-        ok, landed = rollout(job_of, corr, h_true(N))
+        Hs = dock['H'] if dock is not None else h_true(N)
+        ok, landed = rollout(job_of, corr, Hs, dock['residual'] if dock is not None else None)
         d = rollout.diag
         collision_free = ok & ~rollout.hand_hit
-        res = {names[j]: dict(success=f'{int(ok[job_of == j].sum())}/{per}',
+        res = {names[j]: dict(success=f'{int(ok[job_of == j].sum())}/{int((job_of == j).sum())}',
                               success_no_hand_contact=f'{int(collision_free[job_of == j].sum())}/{per}' if a.hand else None,
                               hand_contact=f'{int(rollout.hand_hit[job_of == j].sum())}/{per}' if a.hand else None,
                               hand_max_force_n=round(float(rollout.hand_max_force[job_of == j].max()), 2) if a.hand else None,
                               hand_max_penetration_mm=round(float(rollout.hand_max_pen[job_of == j].max()) * 1000, 2) if a.hand else None,
-                              loose=f'{int(rollout.loose[job_of == j].sum())}/{per}',
+                              loose=f'{int(rollout.loose[job_of == j].sum())}/{int((job_of == j).sum())}',
                               landed=np.bincount(landed[job_of == j] + 1, minlength=14).tolist(),
                               x_err_mm=round(float(np.median(d[job_of == j, 0])) * 1000, 1),
                               y_err_mm=round(float(np.median(d[job_of == j, 1])) * 1000, 1),
                               upright=round(float(d[job_of == j, 2].mean()), 2),
-                              low_mm=round(float(np.median(d[job_of == j, 3])) * 1000, 1)) for j in range(nj)}
+                              low_mm=round(float(np.median(d[job_of == j, 3])) * 1000, 1))
+               for j in range(nj) if np.any(job_of == j)}
         for nm, r in res.items():
             print(f'{nm}: {r["success"]} (loose {r["loose"]})  x err {r["x_err_mm"]} mm, y err {r["y_err_mm"]} mm, upright {r["upright"]}, '
                   f'lowest {r["low_mm"]} mm from the rim  (landed gap counts, -1 first: {r["landed"]})', flush=True)
@@ -306,11 +321,12 @@ def main():
         if a.hand:
             print(f'hand contact {int(rollout.hand_hit.sum())}/{N}; strict collision-free {int(collision_free.sum())}/{N}; '
                   f'max force {rollout.hand_max_force.max():.2f} N, max penetration {rollout.hand_max_pen.max() * 1000:.2f} mm')
-        samples = ([dict(pin=names[int(job_of[e])], rep=int(e % per), strict_success=bool(ok[e]),
+        samples = ([dict(pin=names[int(job_of[e])], rep=int(e), strict_success=bool(ok[e]),
                          hand_contact=bool(rollout.hand_hit[e]), hand_max_force_n=round(float(rollout.hand_max_force[e]), 4),
                          hand_max_penetration_mm=round(float(rollout.hand_max_pen[e]) * 1000, 4)) for e in range(N)]
                    if a.hand else None)
-        out = dict(mode='eval', job=a.job, corr=corr_d, results=res, total=f'{int(ok.sum())}/{N}',
+        out = dict(mode='eval', job=a.job, corr=corr_d, dock_traj=a.dock_traj or None,
+                   dock_method=(str(dock['method']) if dock is not None else None), results=res, total=f'{int(ok.sum())}/{N}',
                    total_no_hand_contact=f'{int(collision_free.sum())}/{N}' if a.hand else None,
                    hand_contact=f'{int(rollout.hand_hit.sum())}/{N}' if a.hand else None,
                    hand_max_force_n=float(rollout.hand_max_force.max()) if a.hand else None,

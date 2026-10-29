@@ -21,7 +21,8 @@ import cv2
 import numpy as np
 
 ROOT = Path(__file__).resolve().parent.parent
-PROMPTS = ['bowl', 'plate', 'dish drying rack']
+PROMPTS = ['bowl', 'ceramic plate', 'red ceramic plate', 'dish drying rack']
+NAME_ALIASES = {'ceramic plate': 'plate', 'red ceramic plate': 'plate'}
 COLOURS = {'bowl': (255, 140, 0), 'plate': (60, 200, 255), 'dish drying rack': (180, 180, 180)}   # RGB
 # basket frame (slot frame, z = rim): x robot side -> far side, y left seen from the robot (plate_plans.basket_gaps)
 HALF = (0.265, 0.26)
@@ -39,6 +40,7 @@ class Detector:
     def __init__(self, prompts=PROMPTS, zoom=2.0, imgsz=640, half=False):
         from ultralytics import YOLOE
         self.names, self.zoom = [p for p in prompts if p != 'bowl'], zoom
+        self.output_names = list(dict.fromkeys(NAME_ALIASES.get(p, p) for p in self.names))
         self.imgsz, self.half = int(imgsz), bool(half)
         self.m = YOLOE(str(ROOT / 'yoloe-v8l-seg.pt'))
         self.m.set_classes(self.names, self.m.get_text_pe(self.names))
@@ -53,7 +55,7 @@ class Detector:
         if r.boxes is None or not len(r.boxes):
             return []
         masks = r.masks.data.cpu().numpy() > 0.5 if r.masks is not None else [None] * len(r.boxes)
-        return [(names[int(k)], float(c), tuple(int(v) for v in b), m) for k, c, b, m in
+        return [(NAME_ALIASES.get(names[int(k)], names[int(k)]), float(c), tuple(int(v) for v in b), m) for k, c, b, m in
                 zip(r.boxes.cls.cpu().numpy(), r.boxes.conf.cpu().numpy(), r.boxes.xyxy.cpu().numpy(), masks)]
 
     def __call__(self, rgb, conf=0.15, margin=30):
@@ -181,28 +183,46 @@ def audience_objects(dets, overlap=0.45):
     return kept
 
 
-def draw_audience(rgb, dets, K, Tbc, Tb, chosen):
-    """Clean audience view: objects and thin quadrant guides; never show the basket detection or occupancy text."""
+def _basket_image_polygon(K, Tbc, Tb):
+    if K is None or Tbc is None or Tb is None:
+        return None
+    local = np.array([[-HALF[0], -HALF[1], 0], [HALF[0], -HALF[1], 0],
+                      [HALF[0], HALF[1], 0], [-HALF[0], HALF[1], 0]], float)
+    Tcb = np.linalg.inv(Tbc) @ Tb
+    P = local @ Tcb[:3, :3].T + Tcb[:3, 3]
+    return ((P @ K.T)[:, :2] / P[:, 2:3]).astype(np.int32)
+
+
+def _in_basket(det, polygon, shape):
+    if polygon is None:
+        return False
+    _, _, (x0, y0, x1, y1), mask = det
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    if cv2.pointPolygonTest(polygon, (cx, cy), False) >= 0:
+        return True
+    if mask is None or mask.shape != shape:
+        return False
+    basket = np.zeros(shape, np.uint8)
+    cv2.fillConvexPoly(basket, polygon, 1)
+    return np.count_nonzero(mask & (basket > 0)) >= 0.2 * max(1, np.count_nonzero(mask))
+
+
+def draw_audience(rgb, dets, K, Tbc, Tb, chosen=None):
+    """Clean audience view: the pick plate is `target`; any detected object in the basket is `obstacle`."""
     img = rgb.copy()
-    for name, _, (x0, y0, x1, y1), mask in audience_objects(dets):
-        col = np.asarray(COLOURS[name], np.uint8)
+    polygon = _basket_image_polygon(K, Tbc, Tb)
+    for det in audience_objects(dets):
+        name, _, (x0, y0, x1, y1), mask = det
+        role = 'obstacle' if name == 'bowl' or _in_basket(det, polygon, img.shape[:2]) else 'target'
+        col = np.asarray((245, 80, 70) if role == 'obstacle' else (40, 210, 255), np.uint8)
         if mask is not None and mask.shape == img.shape[:2]:
             img[mask] = (0.72 * img[mask] + 0.28 * col).astype(np.uint8)
             contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             cv2.drawContours(img, contours, -1, tuple(int(v) for v in col), 2)
         else:
             cv2.rectangle(img, (x0, y0), (x1, y1), tuple(int(v) for v in col), 2)
-        cv2.putText(img, name, (x0, max(18, y0 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
+        cv2.putText(img, role, (x0, max(18, y0 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
                     tuple(int(v) for v in col), 2)
-    if Tb is not None:
-        Tcb = np.linalg.inv(Tbc) @ Tb
-        for q in QUADRANTS:
-            P = quadrant_corners(q) @ Tcb[:3, :3].T + Tcb[:3, 3]
-            uv = (P @ K.T)[:, :2] / P[:, 2:3]
-            col = (255, 220, 0) if q == chosen else (210, 210, 210)
-            cv2.polylines(img, [uv.astype(np.int32)], True, col, 2 if q == chosen else 1, cv2.LINE_AA)
-            u, v = uv.mean(0).astype(int)
-            cv2.putText(img, q, (u - 10, v + 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 1, cv2.LINE_AA)
     return img
 
 
@@ -265,7 +285,8 @@ def detect_live(a):
             n_frames += 1                                      # (10/26 보스) no changing numbers on the image: terminal, every 5 s
             if time.perf_counter() - t_prev > 5.0:
                 print(f'{n_frames / (time.perf_counter() - t_prev):.1f} fps, YOLOE {ms:.0f} ms, conf >= {a.conf}: '
-                      + ', '.join(f'{n} {sum(d[0] == n for d in dets)}' for n in det.names + (['bowl'] if det.bowl else [])), flush=True)
+                      + ', '.join(f'{n} {sum(d[0] == n for d in dets)}'
+                                  for n in det.output_names + (['bowl'] if det.bowl else [])), flush=True)
                 t_prev, n_frames = time.perf_counter(), 0
             cv2.imshow(win, img[:, :, ::-1])
             if (cv2.waitKey(1) & 0xff) in (ord('q'), 27):

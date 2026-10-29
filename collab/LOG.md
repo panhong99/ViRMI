@@ -5585,3 +5585,7 @@ plate 삽입 +y 5 cm, 손목 회전 30–45° 이내, 오늘 밤 sim에서 핸�
 ### 2026-10-29 10:3x Codex — CP 보스 화면 수정
 - 외부 파지 접시는 `target`, 바구니 내부 검출 객체는 `obstacle`로 표시하고 Q1–Q4 분면선을 제거했다(`0a4e1c1`). `red ceramic plate` 프롬프트를 추가해 저장 프레임의 세워진 빨간 접시를 0.155로 검출했고, 외부 흰 접시는 0.787이었다. 내부 state도 빨간 접시를 Q3 plate 1753점으로 기록해 Q4를 빈 분면으로 판정했다.
 - 수정 화면: `outputs/demo_audience_20261029/audience_target_obstacle.png`. 전체 회귀 108 tests 통과.
+
+### 2026-10-29 10:48 Codex — 관객 화면 RGB-D share 출력 (`9ab8280`)
+- 실행 명령: `DISPLAY=:1 ~/miniconda3/envs/foundationpose/bin/python -u calibration/demo_watch.py --detect_only --camera fixed --audience --write_share --T_base_cam calibration/data/real_handeye/20261016_134701_fromwrist_drop3/T_base_cam_pnp.json --basket /tmp/demo_audience_basket_20261029_104235.json --imgsz 512 --half --zoom 2.0`.
+- share 갱신: 카메라에서 읽어 YOLOE로 처리하는 **매 프레임**마다 `/dev/shm/fixed_latest.npz`를 `fixed_latest.tmp.npz` → rename으로 원자 교체한다. 형식은 `rgb`, m 단위 `depth`, `K`, Unix 초 `t`; 현재 관객 화면 실측 처리율은 약 16.5 fps라 같은 조건의 예상 갱신 주기도 약 0.061 s이다. 이번 heartbeat에서는 실행 중 화면을 재시작하지 않고 writer→`tesollo/fixed_frames.py` 소비 smoke와 calibration 회귀 **108/108**만 확인했다.

@@ -79,6 +79,7 @@ def main():
     a.add_argument('--out', required=True)
     a.add_argument('--seed', type=int, default=0)
     a.add_argument('--quadrants', nargs='+', default=['Q3', 'Q4'])
+    a.add_argument('--held_prob', type=float, default=0.5, help='share of samples with a plate over / in a gap')
     a = a.parse_args()
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=False)
@@ -91,7 +92,8 @@ def main():
     for i in range(a.n):
         q = a.quadrants[i % len(a.quadrants)]
         m, ts, inserted = D.build_scene(rng, parts, B, tines, 'v5_cross')
-        if rng.random() < 0.5:
+        held = rng.random() < a.held_prob
+        if held:
             held_plate(m, rng, ts, q, B)
         T = T0.copy()                                             # the camera may be re-mounted a little
         T[:3, 3] += rng.normal(0, [0.03, 0.03, 0.03])
@@ -117,7 +119,7 @@ def main():
                     rec[k] = [float(u * D.SX), float(v * D.SY)] if 0 <= u < D.W and 0 <= v < D.H else None
                     rec[k + '_vis'] = bool(rec[k + '_vis'] and rec[k] is not None)
             lab.append(rec)
-        meta.append(dict(i=i, profile='side_v1', quadrant=q, crop=[x0, y0, w, h], inserted_plates=inserted, tines=lab))
+        meta.append(dict(i=i, profile='side_v1', quadrant=q, held=bool(held), crop=[x0, y0, w, h], inserted_plates=inserted, tines=lab))
         if i % 500 == 0:
             print(f'{i}/{a.n}', flush=True)
     (out / 'labels.json').write_text(json.dumps(dict(size=[D.OW, D.OH], scale=[D.SX, D.SY], profile='side_v1', samples=meta)))

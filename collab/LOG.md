@@ -5580,3 +5580,8 @@ plate 삽입 +y 5 cm, 손목 회전 30–45° 이내, 오늘 밤 sim에서 핸�
 - 실행 명령: `DEMO_AUDIENCE=1 bash calibration/run.sh demo1103` (`--execute`는 보스가 실증할 때만 추가).
 - 측정 fps (저장 D455 프레임, YOLOE 전체+zoom 2-pass, warmup 3 + 15회): 640/FP32/zoom2.0 **33.65**, 512/FP32/2.0 **36.19**, 512/FP16/2.0 **36.79**(선택), 416/FP16/2.0 **37.20**, 512/FP16/1.5 **37.27**. 512/FP16/2.0은 기존 대비 +9.3%; 416·zoom1.5의 추가 이득은 약 1%라 작은 bowl detail을 보존하려고 쓰지 않음. 실카메라는 이번 heartbeat 금지 지침에 따라 열지 않았고 저장 프레임 기준이다.
 - 화면 캡처: `outputs/demo_audience_20261029/audience_512_fp16.png` (설정표 `fps_offline.tsv`, 상세 `summary.md`).
+
+
+### 2026-10-29 10:3x Codex — CP 보스 화면 수정
+- 외부 파지 접시는 `target`, 바구니 내부 검출 객체는 `obstacle`로 표시하고 Q1–Q4 분면선을 제거했다(`0a4e1c1`). `red ceramic plate` 프롬프트를 추가해 저장 프레임의 세워진 빨간 접시를 0.155로 검출했고, 외부 흰 접시는 0.787이었다. 내부 state도 빨간 접시를 Q3 plate 1753점으로 기록해 Q4를 빈 분면으로 판정했다.
+- 수정 화면: `outputs/demo_audience_20261029/audience_target_obstacle.png`. 전체 회귀 108 tests 통과.

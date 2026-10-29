@@ -1,11 +1,12 @@
-"""Tesollo plate: the basket legs from a pendant-taught insert (tesollo/taught_inserts.json, dg5fs_sdk.py --teach).
+"""Tesollo plate: the post-grasp path from a pendant-taught insert (tesollo/taught_inserts.json, dg5fs_sdk.py --teach).
 
-보스 10/29: teach 1 = over the basket, teach 2 = down to 1 cm over the slot, teach 3 = in the slot.  After the grasp:
-    lift (tesollo arm_plan lift)  ->  to_above: lift end -> teach 1 (joint line)          [merged: lift_carry]
-    descend: teach 1 -> teach 2 -> teach 3      ascend: teach 3 -> teach 2 -> teach 1      to_home: teach 1 -> home
-Joint lines in <= 2 deg steps.  If the basket measured now (--basket) is away from the one at teaching, every taught pose
-is moved with it (flange pose in the basket frame, IK from the taught joints); within 3 mm / 0.3 deg the joints as taught.
-    ~/miniconda3/envs/foundationpose/bin/python tesollo/taught_plan.py [--index -1] [--basket /tmp/tesollo_basket_X.json]
+보스 10/29: teach 1 = over the basket, teach 2 = 1 cm over the slot, teach 3 = in the slot.  Grasp is the last stop;
+after it ONE spline with few knots, no collision sweep (보스: nothing to hit, 1 cm waypoints + per-point FK checks banned):
+    post_grasp:  grasp -> lift (+rise) -> carry knots (joint line, <= 30 deg per knot) -> teach 1 -> teach 2 -> teach 3
+    return_home: teach 3 -> teach 2 -> teach 1 -> home   (after the release, one spline)
+Each leg <= 20 knots.  The taught poses follow the basket measured now (flange pose in the basket frame, IK) and another
+pin of the taught quadrant (shifted by the gap spacing along the pin row); within 3 mm / 0.3 deg the joints as taught.
+    ~/miniconda3/envs/foundationpose/bin/python tesollo/taught_plan.py [--index -1] [--basket X.json] [--pin 12]
 """
 import argparse
 import json
@@ -19,13 +20,14 @@ sys.path.insert(0, str(HERE))
 import numpy as np
 import yaml
 import plate_plans as pp
-from basket_plan import lift_line, merge_lift_carry, shifted_grasp
+from basket_plan import shifted_grasp
 
 TAUGHT = HERE / 'taught_inserts.json'
+MAX_KNOTS, KNOT_DEG = 20, 30.0
 
 
-def line(qs, step=2.0):
-    """Joint lines through qs, <= step deg per move."""
+def knots(qs, step=KNOT_DEG):
+    """Joint-line knots through qs, no joint more than `step` deg between two knots."""
     out = [list(map(float, qs[0]))]
     for a, b in zip(qs[:-1], qs[1:]):
         a, b = np.array(a, float), np.array(b, float)
@@ -38,68 +40,78 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--index', type=int, default=-1, help='taught_inserts.json entry (default the last)')
     p.add_argument('--basket', help='basket_vision.json measured now (T); default: as at the teaching')
+    p.add_argument('--quadrant', help='must be the taught one (default it)')
+    p.add_argument('--pin', type=int, help='another pin of the taught quadrant (default the taught pin)')
     p.add_argument('--dx', type=float, default=0.0)
     p.add_argument('--dy', type=float, default=0.0)
-    p.add_argument('--rise', type=float, default=0.12)
+    p.add_argument('--rise', type=float, default=0.10, help='straight lift after the grasp before the carry [m]')
     a = p.parse_args()
     e = json.loads(TAUGHT.read_text())[a.index]
     pts = e['waypoints_deg']
     if len(pts) < 2:
         sys.exit(f'taught entry {a.index} has {len(pts)} points (need over the basket ... in the slot)')
+    if a.quadrant and a.quadrant != e['quadrant']:
+        sys.exit(f'REFUSED: only {e["quadrant"]} is taught (asked {a.quadrant})')
     k = pp.Kinematics()
     A = yaml.safe_load((HERE / 'arm_poses.yaml').read_text())['plate']
-    grasp = shifted_grasp(k, A['posj_deg'], a.dx, a.dy)
-    lift = [list(map(float, w)) for w in lift_line(k, grasp, a.rise)]
+    grasp = np.array(shifted_grasp(k, A['posj_deg'], a.dx, a.dy), float)
     home = list(map(float, pp.C['robot']['home_joints_deg']))
     Tt = np.array(e['basket_T'])
-    note = 'basket as taught'
-    if a.basket:
-        Tn = np.array(json.loads(Path(a.basket).read_text())['T'])
-        D = Tn @ np.linalg.inv(Tt)
-        dmm = np.linalg.norm(D[:3, 3]) * 1000
-        ddeg = np.degrees(np.arccos(np.clip((np.trace(D[:3, :3]) - 1) / 2, -1, 1)))
-        if dmm > 3 or ddeg > 0.3:
-            moved, prev = [], np.radians(pts[0])
-            for q in pts:
-                T = D @ k.fk(np.radians(q))
-                sol = k.ik(T, prev)
-                if sol is None or np.abs(k.fk(sol)[:3, 3] - T[:3, 3]).max() > 1e-3:
-                    sys.exit(f'REFUSED: the taught pose {q} has no IK with the basket moved {dmm:.0f} mm / {ddeg:.1f} deg')
-                moved.append(np.degrees(sol).tolist())
-                prev = sol
-            if np.abs(np.diff(np.array(moved), axis=0)).max() > 30:
-                sys.exit('REFUSED: the moved taught poses jump (wrist flip)')
-            pts = moved
-            note = f'taught poses moved with the basket ({dmm:.0f} mm, {ddeg:.1f} deg)'
-        else:
-            note = f'basket within {dmm:.1f} mm / {ddeg:.2f} deg of the teaching: joints as taught'
-    above, ins = pts[0], pts[-1]
-    legs = dict(to_grasp=[home, list(map(float, grasp))], lift=lift, to_above=line([lift[-1], above]),
-                descend=line(pts), ascend=line(pts[::-1]), to_home=line([above, home]))
-    for name, w in legs.items():
+    Tn = np.array(json.loads(Path(a.basket).read_text())['T']) if a.basket else Tt
+    D = Tn @ np.linalg.inv(Tt)                                   # the basket since the teaching
+    pin = a.pin or e['pin']
+    if pin != e['pin']:                                          # the same quadrant, another gap: along the pin row
+        mq = pp.robot_quadrants(Tt)[e['quadrant']]
+        g = pp.basket_gaps()[mq]
+        d_b = g[pp.pin_gap(Tt, mq, pin)] - g[pp.pin_gap(Tt, mq, e['pin'])]
+        S = np.eye(4)
+        S[:3, 3] = Tt[:3, :3] @ d_b
+        D = D @ S
+    dmm = np.linalg.norm(D[:3, 3]) * 1000
+    ddeg = np.degrees(np.arccos(np.clip((np.trace(D[:3, :3]) - 1) / 2, -1, 1)))
+    if dmm > 3 or ddeg > 0.3:
+        moved, prev = [], np.radians(pts[0])
+        for q in pts:
+            T = D @ k.fk(np.radians(q))
+            sol = k.ik(T, prev)
+            if sol is None or np.abs(k.fk(sol)[:3, 3] - T[:3, 3]).max() > 1e-3:
+                sys.exit(f'REFUSED: the taught pose {q} has no IK moved {dmm:.0f} mm / {ddeg:.1f} deg')
+            moved.append(np.degrees(sol).tolist())
+            prev = sol
+        if np.abs(np.diff(np.array(moved), axis=0)).max() > 30:
+            sys.exit('REFUSED: the moved taught poses jump (wrist flip)')
+        pts = moved
+        note = f'taught poses moved {dmm:.0f} mm / {ddeg:.1f} deg (basket now' + (f', pin {e["pin"]} -> {pin})' if pin != e['pin'] else ')')
+    else:
+        note = f'joints as taught (basket within {dmm:.1f} mm / {ddeg:.2f} deg)'
+    T = k.fk(np.radians(grasp))                                  # the lift: one knot straight up
+    T[2, 3] += a.rise
+    up = np.degrees(k.ik(T, np.radians(grasp)))
+    post = knots([grasp, up, pts[0]]) + [list(map(float, q)) for q in pts[1:]]
+    back = knots([pts[-1]] + pts[-2::-1] + [home])
+    for name, w in (('post_grasp', post), ('return_home', back)):
+        if len(w) > MAX_KNOTS:
+            sys.exit(f'REFUSED: {name} needs {len(w)} knots (> {MAX_KNOTS})')
         W = np.array(w)
         if np.abs(W[:, 4]).max() > 132 or np.abs(W[:, 2]).max() > 157:
             sys.exit(f'REFUSED: {name} near a joint limit')
-    # the carry over the basket footprint: the flange >= 30 cm over the rim (the hand + hanging plate are ~25 cm long)
-    Tb = np.array(json.loads(Path(a.basket).read_text())['T']) if a.basket else Tt
-    over = [(np.linalg.inv(Tb) @ k.fk(np.radians(q))[:, 3])[:3] for q in legs['to_above']]
+    # report only (no gate): the flange over the basket on the carry, basket frame (rim = 0)
+    over = [(np.linalg.inv(Tn) @ k.fk(np.radians(q))[:, 3])[:3] for q in post[:len(post) - len(pts) + 1]]
     inside = [b[2] for b in over if abs(b[0]) < 0.30 and abs(b[1]) < 0.30]
-    if inside and min(inside) < 0.30:
-        sys.exit(f'REFUSED: the carry passes {min(inside) * 100:.0f} cm over the basket rim (flange) - teach the first pose higher')
-    print(f'carry over the basket: flange >= {min(inside) * 100 if inside else float("nan"):.0f} cm over the rim', flush=True)
     plan = dict(dry_run=True, accepted=True, reasons=[], margin_m=0.0, created=time.strftime('%Y-%m-%d %H:%M:%S'),
-                source=f'taught insert #{a.index} {e["quadrant"]} pin {e["pin"]} ({e["time"]}), {note}',
-                basket_T=e['basket_T'], plate_in_tcp=e.get('plate_in_tcp'),
-                legs={n: dict(waypoints_deg=w, min_clearance_straight_m=0.0, planner='taught') for n, w in legs.items()})
-    out = pp.DATA / 'rl_plans' / (time.strftime('%Y%m%d_%H%M%S') + '_hand_taught')
+                source=f'taught insert #{a.index} {e["quadrant"]} pin {pin} (taught pin {e["pin"]}, {e["time"]}), {note}; '
+                       'sparse, no collision sweep', basket_T=Tn.tolist(), plate_in_tcp=e.get('plate_in_tcp'), tool_length_m=0.12,
+                legs={n: dict(waypoints_deg=np.round(w, 3).tolist(), min_clearance_straight_m=0.0, planner='taught sparse')
+                      for n, w in (('to_grasp', [home, grasp.tolist()]), ('post_grasp', post), ('return_home', back))})
+    out = pp.DATA / 'rl_plans' / (time.strftime('%Y%m%d_%H%M%S') + f'_{int(time.time() * 1000) % 1000:03d}_hand_taught')
     out.mkdir(parents=True, exist_ok=True)
     (out / 'plan.json').write_text(json.dumps(plan, indent=1))
     print(f'basket: {note}')
-    print(f'OK: taught {e["quadrant"]} pin {e["pin"]}: over the basket {np.round(above, 1).tolist()}, '
-          f'in the slot {np.round(ins, 1).tolist()} ({len(pts)} taught poses)')
-    for n, w in legs.items():
-        print(f'  {n}: {len(w)} waypoints, end {[round(x, 1) for x in w[-1]]}')
-    merge_lift_carry(out / 'plan.json')
+    print(f'OK: taught {e["quadrant"]} pin {pin}: post_grasp {len(post)} knots (grasp, lift {a.rise * 100:.0f} cm, carry, '
+          f'teach 1..{len(pts)}), return_home {len(back)} knots; carry flange over the basket >= '
+          f'{min(inside) * 100 if inside else float("nan"):.0f} cm over the rim (TCP not checked)')
+    for n in ('post_grasp', 'return_home'):
+        print(f'  {n}: {len(plan["legs"][n]["waypoints_deg"])} waypoints, end {plan["legs"][n]["waypoints_deg"][-1]}')
     print('plan:', out / 'plan.json')
 
 

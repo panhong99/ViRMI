@@ -36,9 +36,10 @@ class Detector:
     """YOLOE on the whole frame for the other prompts; 'bowl' in the prompts = a second pass on the basket box (+ margin)
     zoomed `zoom` x with BOWL_PROMPT alone (bowls are ~40 px there and lose to 'plate' / the rack in one pass)."""
 
-    def __init__(self, prompts=PROMPTS, zoom=2.0):
+    def __init__(self, prompts=PROMPTS, zoom=2.0, imgsz=640, half=False):
         from ultralytics import YOLOE
         self.names, self.zoom = [p for p in prompts if p != 'bowl'], zoom
+        self.imgsz, self.half = int(imgsz), bool(half)
         self.m = YOLOE(str(ROOT / 'yoloe-v8l-seg.pt'))
         self.m.set_classes(self.names, self.m.get_text_pe(self.names))
         self.bowl = None
@@ -47,7 +48,8 @@ class Detector:
             self.bowl.set_classes([BOWL_PROMPT, 'dish drying rack'], self.bowl.get_text_pe([BOWL_PROMPT, 'dish drying rack']))
 
     def _predict(self, model, names, rgb, conf):
-        r = model.predict(rgb[:, :, ::-1].copy(), conf=conf, verbose=False, retina_masks=True)[0]
+        r = model.predict(rgb[:, :, ::-1].copy(), conf=conf, verbose=False, retina_masks=True,
+                          imgsz=self.imgsz, half=self.half)[0]
         if r.boxes is None or not len(r.boxes):
             return []
         masks = r.masks.data.cpu().numpy() > 0.5 if r.masks is not None else [None] * len(r.boxes)
@@ -161,6 +163,49 @@ def draw(rgb, dets, K, Tbc, Tb, counts, chosen, note='', show_conf=False, plates
     return img
 
 
+def _box_iou(a, b):
+    x0, y0, x1, y1 = max(a[0], b[0]), max(a[1], b[1]), min(a[2], b[2]), min(a[3], b[3])
+    inter = max(0, x1 - x0) * max(0, y1 - y0)
+    aa, bb = max(1, (a[2] - a[0]) * (a[3] - a[1])), max(1, (b[2] - b[0]) * (b[3] - b[1]))
+    return inter / (aa + bb - inter)
+
+
+def audience_objects(dets, overlap=0.45):
+    """One spectator overlay per object.  The zoomed bowl pass wins over the whole-frame plate duplicate."""
+    candidates = sorted((d for d in dets if d[0] in ('bowl', 'plate')),
+                        key=lambda d: (d[0] == 'bowl', d[1]), reverse=True)
+    kept = []
+    for d in candidates:
+        if not any(_box_iou(d[2], old[2]) >= overlap for old in kept):
+            kept.append(d)
+    return kept
+
+
+def draw_audience(rgb, dets, K, Tbc, Tb, chosen):
+    """Clean audience view: objects and thin quadrant guides; never show the basket detection or occupancy text."""
+    img = rgb.copy()
+    for name, _, (x0, y0, x1, y1), mask in audience_objects(dets):
+        col = np.asarray(COLOURS[name], np.uint8)
+        if mask is not None and mask.shape == img.shape[:2]:
+            img[mask] = (0.72 * img[mask] + 0.28 * col).astype(np.uint8)
+            contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            cv2.drawContours(img, contours, -1, tuple(int(v) for v in col), 2)
+        else:
+            cv2.rectangle(img, (x0, y0), (x1, y1), tuple(int(v) for v in col), 2)
+        cv2.putText(img, name, (x0, max(18, y0 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
+                    tuple(int(v) for v in col), 2)
+    if Tb is not None:
+        Tcb = np.linalg.inv(Tbc) @ Tb
+        for q in QUADRANTS:
+            P = quadrant_corners(q) @ Tcb[:3, :3].T + Tcb[:3, 3]
+            uv = (P @ K.T)[:, :2] / P[:, 2:3]
+            col = (255, 220, 0) if q == chosen else (210, 210, 210)
+            cv2.polylines(img, [uv.astype(np.int32)], True, col, 2 if q == chosen else 1, cv2.LINE_AA)
+            u, v = uv.mean(0).astype(int)
+            cv2.putText(img, q, (u - 10, v + 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 1, cv2.LINE_AA)
+    return img
+
+
 def load_basket(path):
     try:
         r = json.loads(Path(path).read_text())
@@ -179,7 +224,7 @@ def detect_live(a):
     """(10/26 보스: YOLOE만 띄워서 검출 확인) boxes + masks only, camera opened here (nothing else may hold it) at its
     own rate, or the perception share.  Prompts / conf from the command line; fps and YOLOE ms in the terminal."""
     import sys
-    det = Detector(a.prompts)
+    det = Detector(a.prompts, zoom=a.zoom, imgsz=a.imgsz, half=a.half)
     cam = None
     if a.camera:
         sys.path.insert(0, str(ROOT / 'real_time_project'))
@@ -251,11 +296,18 @@ def main():
     a.add_argument('--camera', help="--detect_only: open this D455 here ('fixed' = the config's fixed camera) instead of the share")
     a.add_argument('--prompts', nargs='+', default=PROMPTS, help='--detect_only: YOLOE prompts')
     a.add_argument('--conf', type=float, default=0.15, help='--detect_only: YOLOE confidence threshold')
+    a.add_argument('--imgsz', type=int, default=None, help='YOLOE inference size (audience: 512, otherwise: 640)')
+    a.add_argument('--half', action=argparse.BooleanOptionalAction, default=None,
+                   help='YOLOE FP16 inference on CUDA (audience: on, otherwise: off)')
+    a.add_argument('--zoom', type=float, default=2.0, help='bowl crop scale')
+    a.add_argument('--audience', action='store_true', help='clean spectator overlay: object masks/labels and thin quadrant guides; hides basket detection')
     a = a.parse_args()
+    a.imgsz = a.imgsz or (512 if a.audience else 640)
+    a.half = a.audience if a.half is None else a.half
     if a.detect_only:
         return detect_live(a)
     Tbc = np.asarray(json.loads(Path(a.T_base_cam).read_text())['T_base_cam'], float)
-    det, n, recent = Detector(), 0, []
+    det, n, recent = Detector(zoom=a.zoom, imgsz=a.imgsz, half=a.half), 0, []
     last = 0.0 if a.frame else time.time() - 1.0     # (10/26 보스) not the previous run's frame left in the share
     win = 'demo: fixed camera'
     if not a.no_window and not a.png:
@@ -301,8 +353,11 @@ def main():
                                   empty_now=[q for q in a.allowed if not now[q] and q not in (a.show_full or []) + (a.show_plate or [])],
                                   chosen=chosen_by_rule, bowls=bowl_boxes(dets, depth, K, Tbc, a.posj),
                                   dets=[(nm, round(c, 3), b) for nm, c, b, _ in dets]))
-        img = draw(rgb, dets, K, Tbc, Tb, counts, taken or chosen_by_rule,
-                   '' if Tb is not None else 'basket: measuring ...', plates=plates)
+        if a.audience:
+            img = draw_audience(rgb, dets, K, Tbc, Tb, taken or chosen_by_rule)
+        else:
+            img = draw(rgb, dets, K, Tbc, Tb, counts, taken or chosen_by_rule,
+                       '' if Tb is not None else 'basket: measuring ...', plates=plates)
         if a.png:
             cv2.imwrite(a.png, img[:, :, ::-1])
             print(json.dumps(dict(counts=counts, empty=empty, chosen=chosen_by_rule, dets=len(dets))), flush=True)

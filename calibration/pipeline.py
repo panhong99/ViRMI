@@ -698,9 +698,13 @@ def start_demo_watch(args, Tbc, posj, out, children, env):
                                   '--allowed', *args.auto_quadrants, '--until_pid', str(os.getpid())]
                    + (['--posj', *map(str, posj)] if posj is not None else ['--posj', *map(str, HOME_JOINTS_DEG)])
                    + ([] if args.demo_view else ['--no_window'])
+                   + (['--audience', '--imgsz', str(args.demo_imgsz), '--half', '--zoom', str(args.demo_zoom)]
+                      if args.demo_audience else [])
                    + (['--show_full', *args.demo_full] if args.demo_full else [])
                    + (['--show_plate', *placed] if placed else []), env, optional=True)
-    print('[분면] 고정 카메라 관측 창: YOLOE bbox + 분면 (초록 = 빈, 빨강 = bowl, 노랑 = 고른 분면)'
+    print(('[분면] 관객 화면: 분면별 물체 mask + 얇은 분면선 (바구니 검출 숨김)'
+           if args.demo_audience else
+           '[분면] 고정 카메라 관측 창: YOLOE bbox + 분면 (초록 = 빈, 빨강 = bowl, 노랑 = 고른 분면)')
           if args.demo_view else '[분면] 고정 카메라로 bowl 관측 시작', flush=True)
 
 
@@ -1830,6 +1834,11 @@ def parse_args(argv=None):
                    help='(10/26 보스, opt-in) the perception window shows the fixed camera only (the wrist camera is not opened)')
     p.add_argument('--demo_view', action='store_true',
                    help='(10/23 11/3 시연, opt-in) spectator window: the fixed camera with YOLOE boxes and the quadrants, until the end')
+    p.add_argument('--demo_audience', action='store_true', default=os.getenv('DEMO_AUDIENCE') == '1',
+                   help='opt-in clean spectator view: hide basket detection, show one mask/label per object and thin quadrant guides '
+                        '(or DEMO_AUDIENCE=1)')
+    p.add_argument('--demo_imgsz', type=int, default=512, help='--demo_audience YOLOE inference size (default: 512)')
+    p.add_argument('--demo_zoom', type=float, default=2.0, help='--demo_audience bowl crop scale (default: 2.0)')
     p.add_argument('--yaw_trim', type=float, default=None, help='--insert quadrant: turn the plate face about the vertical at '
                    'the insert [deg], + = counter-clockwise seen from above (default config basket_quadrant_yaw_trim_deg)')
     p.add_argument('--tilt_trim', type=float, default=None, help='--insert quadrant: lean the plate along the pin rows at the '

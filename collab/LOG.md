@@ -5599,3 +5599,25 @@ plate 삽입 +y 5 cm, 손목 회전 30–45° 이내, 오늘 밤 sim에서 핸�
 - 453e80d `--gripper_path`: 그리퍼 플래너를 지금 바구니로 돌려 관절 경로 + 손목 오프셋. **발견: 10/29 바구니 (0.974, −0.096)는 그리퍼 시연 때보다 +y 11 cm, 그리퍼 플래너도 Q3:6 경로 없음(−y 6 cm 이상이면 있음).**
 - f70b5ab `--taught`: 보스 티칭(11:17 Q3 핀 6) teach1 바구니 위 [−6.184, 12.193, 81.003, −8.685, 29.372, −84.009], teach2 슬롯 1 cm 위 [−2.403, 30.974, 74.722, −13.836, 30.217, −91.829], teach3 슬롯 [−2.403, 35.184, 74.722, −13.836, 30.217, −91.829] → lift→1 한 스플라인, 1→2→3, 복귀 3→2→1→홈; 바구니 이동 시 바구니 좌표로 IK. mover 검사 전 구간 OK, 실기 전.
 - 관절 기록(읽기 전용) `tesollo/teach_log_20261029_110607.jsonl`.
+
+### 2026-10-29 14:49 Codex — 파지 후 sparse one-go 경로 (`4c4d67f`)
+- 보스 지시: 기존 약 50–60 waypoint, 1 cm 단위 상승/하강, 각 sample의 FK 충돌검사를 줄이고 파지 이후 lift→carry→insert를 정지 없이 하나의 spline으로 실행. 목표는 최종 waypoint 20개 이하이며 파지 후 충돌검사는 제거.
+- 구현: direct carry 기본 경로에 `_fast_unchecked_carry`를 적용했다. 수직 Cartesian key pose 간격은 1 cm→최대 15 cm, across 관절 샘플은 2°→30°, 삽입은 13점→4점으로 축약했다. 파지 후 `quadrant_checkers`, dense FK collision sweep, RRT 및 60점 even resample을 호출하지 않는다. 파지 전에 만든 grasp/lift와 sparse carry/insert를 RDP + step 보완으로 20점 이하 한 `one_go` leg에 합친다.
+- 유지 검사: mover의 plan age/accepted/dry-run, 각 knot의 관절 한계, knot 간 최대 45° 검사를 유지했다. spline을 관절공간에서 조밀 샘플링해 관절 한계 2° 여유도 별도로 확인한다. release 뒤 retreat의 홈 이동도 40° 이하가 되도록 분할한다. 이 검사는 FK/환경 충돌검사가 아니다.
+- 저장 실데이터(`calibration/data/real_pipeline/20261013_172129_plate_4efzl6ne`) 오프라인 결과:
+  - Q3: source 19→final **12점**, 계획 **0.381 s** + one-go 조립 **0.0033 s**, knot 최대 **28.599°**, spline 최소 관절 한계 여유 **4.27°**.
+  - Q4: source 19→final **14점**, 계획 **0.380 s** + one-go 조립 **0.0015 s**, knot 최대 **24.499°**, spline 최소 관절 한계 여유 **15.54°**.
+  - release 뒤 retreat: 두 경우 모두 **7점**, knot 최대 Q3 **34.768°**, Q4 **31.635°**. `ros2_nodes.validate` 문제 0건.
+- 시험: `py_compile`, `git diff --check`, 합성 32→8점 case, 실제 Q3/Q4 one-go/retreat mover 정적 검증 통과. 수치 JSON `/tmp/sparse_one_go_validation.json`; 최종 plan 예시는 `calibration/data/rl_plans/20261029_144910_413_one_go/plan.json`, `calibration/data/rl_plans/20261029_144910_797_one_go/plan.json`.
+- 한계: 실로봇은 실행하지 않았다. 파지 이후 환경 충돌 여유는 의도적으로 계산하지 않으므로, 이 모드는 보스가 지시한 비어 있는 운반 공간을 전제로 한다. 접근·파지 경로의 기존 충돌 검사는 그대로다.
+
+### 2026-10-29 15:00 Codex — Tesollo 시연 3/10/49/13/13/19 → 총 20–21점 (`1ec38a1`)
+- 보스가 지적한 실제 Tesollo 시연 leg 수는 접근/상승/운반/하강/상승/홈 = 3/10/49/13/13/19였다. 적용값은 접근 3 유지, 파지 후 수직상승 14 cm를 7 cm 간격 3점, 바구니 위 수평 운반 ≤20점, 수직하강→상승→base/home cycle ≤10점, 전체 ≤40점, 기본 속도 60°/s다.
+- `tesollo/basket_plan.py`: 파지 후 planner를 collision-unchecked direct 모드로 바꾸고 기존 1 cm FK/collision sweep을 제거했다. 수직상승 3점 뒤 TCP z를 일정하게 유지하며 위치·자세를 IK로 잇는 carry를 최대 20점으로 생성한다. 슬롯에서만 수직하강하고, 같은 선으로 상승한 뒤 joint line으로 base/home에 간다. 관절 knot ≤45°와 spline 관절 한계 2° 여유 검사는 유지했다.
+- `tesollo/dg5fs_sdk.py`: 기본 `--vel`을 80→**60°/s**로 변경했다. 파지 후 lift+carry는 한 spline, 하강 뒤 release, 수직상승+home은 `return_home` 한 spline으로 실행한다.
+- 현재 실측 바구니 `/tmp/tesollo_basket_20261029_144406.json` 오프라인 전수:
+  - Q3/Q4 각각 핀 5·6·10·11·12, 총 10건 모두 계획 성공.
+  - carry는 전부 **8점**, 전체는 앞쪽 핀 **21점**, 뒤쪽 핀 **20점**.
+  - Q3:6/Q4:6 세부: lift z 증가 **7.001/6.999 cm**, carry z 범위 **0.011 mm**, 하강 xy 이탈 **0.004/0.006 mm**.
+  - 실행 spline: lift_carry **10점**(최대 knot Q3 31.082°, Q4 23.164°), descend **2점**(5.059°/3.285°), return_home **6점**(30.961°/30.442°). `ros2_nodes.validate` 문제 0건.
+- 검증: `py_compile`, `git diff --check`, Q3/Q4 후보 10건 계획, default와 `--gripper_path` 모두 plan-only 통과. 표 `/tmp/tesollo_sparse_matrix.tsv`, 수치 `/tmp/tesollo_sparse_demo_validation.json`. 로봇·손·카메라·ROS 명령은 실행하지 않았다.

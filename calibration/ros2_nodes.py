@@ -234,6 +234,9 @@ def mover_args(argv=None):
     p.add_argument('--execute', action='store_true', help='really send the moves (otherwise check only)')
     p.add_argument('--vel_deg_s', type=float, default=2.0)
     p.add_argument('--acc_deg_s2', type=float, default=2.0)
+    p.add_argument('--spline_time', action='store_true', help='--smooth: give movesj a total time (its knots get equal time) '
+                   'from the knot spacing so the fastest joint peaks near --vel_deg_s, instead of vel / acc alone '
+                   '(보스 10/29: smooth legs ran far slower than --vel_deg_s)')
     p.add_argument('--max_step_deg', type=float, default=45.0)
     p.add_argument('--max_start_error_deg', type=float, default=3.0)
     p.add_argument('--max_reach_error_deg', type=float, default=1.0)
@@ -432,8 +435,14 @@ def run_mover(argv=None):
             req.pos_cnt = len(targets)
             req.vel, req.acc = [float(args.vel_deg_s)] * 6, [float(args.acc_deg_s2)] * 6
             req.time, req.mode, req.sync_type = 0.0, 0, 0                  # absolute, synchronous
-            print(f'\nspline: {len(targets)} waypoints, joint travel {span:.1f} deg, ~{span / args.vel_deg_s:.0f} s', flush=True)
-            move_timeout = span / args.vel_deg_s * 3 + 30
+            if args.spline_time:
+                # equal time per knot: a cubic through even knots peaks ~1.25x the mean step speed; + 0.5 s to start / stop
+                seg = np.abs(np.diff(np.vstack([now, targets]), axis=0)).max(axis=1)
+                req.time = float(1.25 * len(seg) * seg.max() / args.vel_deg_s + 0.5)
+            print(f'\nspline: {len(targets)} waypoints, joint travel {span:.1f} deg, ~{span / args.vel_deg_s:.0f} s'
+                  + (f', total time set {req.time:.1f} s' if req.time else ''), flush=True)
+            move_timeout = max(span / args.vel_deg_s, req.time) * 3 + 30
+            t_move = time.time()
             if get_tool_force is None:
                 res = call(rclpy, node, move_spline, req, move_timeout)
             else:
@@ -465,7 +474,7 @@ def run_mover(argv=None):
                 request_stop()
                 sys.exit('controller did not accept / complete the spline - stopped, nothing retried')
             reached = np.abs(current() - wp[-1]).max()
-            print(f'  reached, max joint error {reached:.2f} deg', flush=True)
+            print(f'  reached in {time.time() - t_move:.1f} s, max joint error {reached:.2f} deg', flush=True)
             if reached > args.max_reach_error_deg:
                 sys.exit(f'STOP: reached pose is {reached:.2f} deg off the target (> {args.max_reach_error_deg})')
             print('\nleg finished.')

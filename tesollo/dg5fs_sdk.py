@@ -122,7 +122,8 @@ BASKET_JSON = ['']          # (10/29) the basket measured at the start (calibrat
 MOVER_GO = ['--opening_done', '--auto']   # (보스 10/29) this script's own Enter / command starts a step; its legs then run
                             # on without the mover's 'start' + Enter per leg (--leg_enter: the old prompts)
 TAUGHT_LESS = [25.0]        # (보스 10/29) the taught insert's wrist turned back this much (--taught_wrist_less)
-SMOOTH = [True]             # (보스 10/29: stepwise look) one even-knot spline grasp -> in the basket, softer acc (--stepwise = old)
+SMOOTH = [True]             # (보스 10/29: stepwise look) one even-knot spline grasp -> in the basket, softer acc, movesj total
+                            # time from the knots (보스 10/29: too slow, vel alone did not set the speed) (--stepwise = old)
 ACC = [0.5]                 # acc [deg/s^2] = this x vel on every arm leg (--acc_ratio; --stepwise: 1)
 LIFT_M = [0.30]             # (보스 10/29) straight up after the grasp, bowl or plate (--lift)
 PRE_PLAN = {}               # the first basket target's plan, started while the hand closes (보스 10/29: too slow after the grasp)
@@ -236,7 +237,7 @@ def mover(plan, leg, v, extra=()):
     """One mover leg (Enter to go); True if it ran."""
     r = subprocess.run(['bash', str(REPO / 'calibration/run.sh'), 'mover', '--plan', plan, '--leg', leg, '--smooth',
                         '--go_per', 'leg', '--vel_deg_s', str(v), '--acc_deg_s2', str(v * ACC[0]), '--execute', '--go_enter']
-                       + MOVER_GO + list(extra))
+                       + MOVER_GO + list(extra) + (['--spline_time'] if SMOOTH[0] else []))
     if r.returncode:
         print(f'   mover stopped at {leg} (exit {r.returncode})', flush=True)
     return r.returncode == 0
@@ -414,7 +415,7 @@ def arm_legs(obj, legs):
         name = f'{"plate" if obj == "plate" else "bowl"}_{leg}'
         r = subprocess.run(['bash', str(REPO / 'calibration/run.sh'), 'mover', '--plan', m.group(1), '--leg', name,
                             '--smooth', '--go_per', 'leg', '--vel_deg_s', str(v), '--acc_deg_s2', str(v * ACC[0]),
-                            '--execute', '--go_enter'] + MOVER_GO)
+                            '--execute', '--go_enter'] + MOVER_GO + (['--spline_time'] if SMOOTH[0] else []))
         if r.returncode:
             print(f'   mover stopped at {name} (exit {r.returncode})', flush=True)
             return False

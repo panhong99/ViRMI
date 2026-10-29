@@ -46,7 +46,9 @@ class DockEnv:
     act_dim = 3
 
     def __init__(self, num_envs=2048, steps=48, device="cuda:0", seed=0,
-                 job=DEFAULT_JOB, camera=DEFAULT_CAMERA):
+                 job=DEFAULT_JOB, camera=DEFAULT_CAMERA, hang_deg=15.0,
+                 grip_mm=15.0, tilt_deg=3.0, basket_xy_mm=10.0,
+                 basket_yaw_deg=1.0):
         self.device = torch.device(device)
         self.n, self.steps = int(num_envs), int(steps)
         self.gen = torch.Generator(device=self.device).manual_seed(int(seed))
@@ -75,8 +77,13 @@ class DockEnv:
         self.pitch0 = float(cfg["full"]["tine_pitch"]["Q3"])
         self.lean0 = math.radians(float(cfg["full"]["tine_lean_deg"]["Q3"]))
         self.plate_r = 0.134
+        self.hang_deg, self.grip_m, self.tilt_deg = float(hang_deg), float(grip_mm) / 1000, float(tilt_deg)
+        self.basket_xy_m, self.basket_yaw_deg = float(basket_xy_mm) / 1000, float(basket_yaw_deg)
         self.action_scale = torch.tensor([0.002, 0.002, math.radians(1.0)], device=self.device)
-        self.residual_limit = torch.tensor([0.035, 0.035, math.radians(15.0)], device=self.device)
+        self.residual_limit = torch.tensor([0.080, 0.080, math.radians(15.0)], device=self.device)
+        th = torch.linspace(0, 2 * math.pi, 17, device=self.device)[:-1]
+        self.rim_local = torch.stack((self.plate_r * torch.cos(th), self.plate_r * torch.sin(th),
+                                      torch.zeros_like(th)), 1)
         self._alloc()
 
     def _alloc(self):
@@ -91,6 +98,8 @@ class DockEnv:
         self.lean = torch.full((n,), self.lean0, device=d)
         self.band_hold = torch.zeros(n, 3, device=d)   # centre u/v and pitch px
         self.band_valid = torch.zeros(n, dtype=torch.bool, device=d)
+        self.terminated = torch.zeros(n, dtype=torch.bool, device=d)
+        self.terminal_success = torch.zeros(n, dtype=torch.bool, device=d)
         self.last_info = {}
 
     def _uniform(self, shape, lo=-1.0, hi=1.0):
@@ -100,20 +109,21 @@ class DockEnv:
         n, d = self.n, self.device
         self.job = torch.randint(len(self.paths), (n,), generator=self.gen, device=d)
         self.t.zero_(); self.residual.zero_(); self.prev_action.zero_(); self.band_valid.zero_()
+        self.terminated.zero_(); self.terminal_success.zero_()
         # In-hand uncertainty: hang +/-15 deg, translation each axis +/-15 mm, small tilt +/-3 deg.
-        Rh = _axis_angle(self.hang_axis.expand(n, -1), self._uniform((n,), -math.radians(15), math.radians(15)))
+        Rh = _axis_angle(self.hang_axis.expand(n, -1), self._uniform((n,), -math.radians(self.hang_deg), math.radians(self.hang_deg)))
         axis = torch.randn(n, 3, generator=self.gen, device=d)
-        Rt = _axis_angle(axis, self._uniform((n,), 0, math.radians(3)))
+        Rt = _axis_angle(axis, self._uniform((n,), 0, math.radians(self.tilt_deg)))
         A = torch.eye(4, device=d).repeat(n, 1, 1)
         A[:, :3, :3] = Rh @ Rt
-        A[:, :3, 3] = self._uniform((n, 3), -0.015, 0.015)
+        A[:, :3, 3] = self._uniform((n, 3), -self.grip_m, self.grip_m)
         self.H = A @ self.H_nom
         # Actual basket relative to the nominal path: xy +/-1 cm, yaw +/-1 deg.
-        yaw = self._uniform((n,), -math.radians(1), math.radians(1))
+        yaw = self._uniform((n,), -math.radians(self.basket_yaw_deg), math.radians(self.basket_yaw_deg))
         Rz = _axis_angle(torch.tensor([0., 0., 1.], device=d).expand(n, -1), yaw)
         self.Tbb = self.Tbb0.repeat(n, 1, 1)
         self.Tbb[:, :3, :3] = Rz @ self.Tbb[:, :3, :3]
-        self.Tbb[:, :2, 3] += self._uniform((n, 2), -0.01, 0.01)
+        self.Tbb[:, :2, 3] += self._uniform((n, 2), -self.basket_xy_m, self.basket_xy_m)
         self.pitch = self.pitch0 * self._uniform((n,), 0.95, 1.05)
         self.lean = self.lean0 + self._uniform((n,), -math.radians(3), math.radians(3))
         return self._observe()
@@ -151,6 +161,13 @@ class DockEnv:
         # At the current rim height, leaning tine boundaries are between root and tip.
         Tbi_R = self.Tbb[:, :3, :3].transpose(1, 2)
         bottom_b = (Tbi_R @ (bottom - self.Tbb[:, :3, 3])[..., None]).squeeze(-1)
+        # A kinematic floor contact: do not let the diagnostic state pass
+        # below the basket floor before the episode terminates.
+        dz = (self.floor_z - bottom_b[:, 2]).clamp_min(0)
+        shift = self.Tbb[:, :3, 2] * dz[:, None]
+        P[:, :3, 3] += shift
+        bottom += shift
+        bottom_b[:, 2] += dz
         frac = ((bottom_b[:, 2] - self.floor_z) / self.tine_h).clamp(0, 1)
         centre_x = root_x - torch.sin(self.lean) * self.tine_h * frac
         half = self.pitch / 2
@@ -185,45 +202,71 @@ class DockEnv:
         d = uv[:, 4] - centre
         err_along = (d * along).sum(1) / pitch_px
         err_across = (d * across).sum(1) / pitch_px
-        # Normal error to either sign of the Q3 tine-plane normal, in radians.
-        n_b = (self.Tbb[:, :3, :3].transpose(1, 2) @ normal[..., None]).squeeze(-1)
-        desired = torch.stack((torch.cos(self.lean), torch.zeros_like(self.lean), torch.sin(self.lean)), 1)
-        angle = torch.acos((n_b * desired).sum(1).abs().clamp(0, 1))
+        # Camera-observable plate tilt: PCA major axis of the projected plate
+        # mask relative to the projected target band.  The -6 degree nominal
+        # offset comes from the calibrated Q3 camera geometry, not true pose.
+        rim = (P[:, :3, :3] @ self.rim_local.T).transpose(1, 2) + P[:, None, :3, 3]
+        rim_uv = self._project(rim)
+        rd = rim_uv - rim_uv.mean(1, keepdim=True)
+        cov = rd.transpose(1, 2) @ rd / len(self.rim_local)
+        major = torch.linalg.eigh(cov).eigenvectors[:, :, 1]
+        major *= torch.where((major * across).sum(1) < 0, -1.0, 1.0)[:, None]
+        tilt = torch.atan2(across[:, 0] * major[:, 1] - across[:, 1] * major[:, 0],
+                           (major * across).sum(1))
+        tilt += torch.randn(self.n, generator=self.gen, device=self.device) * math.radians(1.0)
+        tilt_error = tilt - math.radians(-6.0)
         remaining = 1.0 - self.t.float() / (self.steps - 1)
         low = (bottom_b[:, 2] - self.floor_z) / 0.15
-        return torch.stack((err_along, err_across, angle / math.radians(20), remaining, low,
+        return torch.stack((err_along, err_across, tilt_error / math.radians(20), remaining, low,
                             self.prev_action[:, 0], self.prev_action[:, 1], self.prev_action[:, 2],
                             self.band_valid.float()), 1).clamp(-5, 5)
 
     def step(self, action):
         action = action.clamp(-1, 1)
+        active = ~self.terminated
         old_action = self.prev_action.clone()
-        self.residual = torch.maximum(torch.minimum(self.residual + action * self.action_scale,
-                                                    self.residual_limit), -self.residual_limit)
-        self.prev_action = action
-        self.t += 1
-        done = self.t >= self.steps - 1
+        remaining = 1.0 - self.t.float() / (self.steps - 1)
+        taper = 0.25 + 0.75 * remaining
+        scale = self.action_scale[None] * taper[:, None]
+        candidate = self.residual + action * scale
+        candidate = torch.maximum(torch.minimum(candidate, self.residual_limit), -self.residual_limit)
+        self.residual[active] = candidate[active]
+        self.prev_action[active] = action[active]
+        self.t[active] += 1
         obs = self._observe()
-        e, ey, ang = obs[:, 0], obs[:, 1], obs[:, 2]
+        e, ey, tilt = obs[:, 0], obs[:, 1], obs[:, 2]
         inside = e.abs() <= 0.5
-        reward = -e.abs() - 0.25 * ey.abs() - 0.20 * ang.abs() - 0.01 * (action - old_action).square().sum(1)
+        _, _, height_ok, angle_ok, _ = self.criteria()
+        reward = -e.abs() - 0.25 * ey.abs() - 0.20 * tilt.abs() - 0.01 * (action - old_action).square().sum(1)
         reward += inside.float() * (0.2 + 0.8 * (1.0 - obs[:, 3]))
         reward -= (e.abs() > 1.0).float() * 2.0
+        contact = active & height_ok
+        timeout = active & (self.t >= self.steps - 1)
+        newly_done = contact | timeout
         success = self.success()
-        reward += done.float() * (success.float() * 12.0 - (~success).float() * 6.0)
-        self.last_info = dict(success=success, along=e, across=ey, angle=ang)
-        return obs, reward, done, self.last_info
+        self.terminal_success[newly_done] = success[newly_done]
+        self.terminated |= newly_done
+        reward *= active.float()
+        reward += newly_done.float() * (success.float() * 12.0 - (~success).float() * 6.0)
+        self.last_info = dict(success=self.terminal_success, along=e, across=ey,
+                              angle_ok=angle_ok, height_ok=height_ok)
+        return obs, reward, self.terminated, self.last_info
 
     def success(self):
+        x_ok, y_ok, height_ok, angle_ok, _ = self.criteria()
+        return x_ok & y_ok & height_ok & angle_ok
+
+    def criteria(self):
         _, bottom, normal, bottom_b, root_x, yc, _ = self._geometry()
-        ids = torch.arange(self.n, device=self.device)
-        gap_idx = self.job_gap[self.job]
         # strict kinematic counterpart of hand_basket: bottom near target, centre across rows, low and aligned.
         n_b = (self.Tbb[:, :3, :3].transpose(1, 2) @ normal[..., None]).squeeze(-1)
         desired = torch.stack((torch.cos(self.lean), torch.zeros_like(self.lean), torch.sin(self.lean)), 1)
         angle = torch.acos((n_b * desired).sum(1).abs().clamp(0, 1))
-        return ((bottom_b[:, 0] - root_x).abs() < 0.0085) & ((bottom_b[:, 1] - yc).abs() < 0.030) & \
-               ((bottom_b[:, 2] - self.floor_z) < 0.055) & (angle < math.radians(20))
+        x_ok = (bottom_b[:, 0] - root_x).abs() < 0.0085
+        y_ok = (bottom_b[:, 1] - yc).abs() < 0.030
+        height_ok = (bottom_b[:, 2] - self.floor_z) <= 0.002
+        angle_ok = angle < math.radians(20)
+        return x_ok, y_ok, height_ok, angle_ok, angle
 
 
 def controller(obs, mode="p"):
@@ -232,17 +275,17 @@ def controller(obs, mode="p"):
     a = torch.zeros(len(obs), 3, device=obs.device)
     # A small per-step gain is deliberate: actions are integrated over the
     # whole descent, so a conventional one-shot P gain oscillates in noise.
-    a[:, 0] = -0.15 * obs[:, 0]
+    a[:, 0] = -0.40 * obs[:, 0]
     # The fixed side view barely observes basket-y at the taught approach;
     # do not integrate saturated image-y noise. Positive pitch reduces the
     # measured normal error for this Q3 camera/hand convention.
     a[:, 1] = 0.0
-    a[:, 2] = 0.20 * obs[:, 2]
+    a[:, 2] = -0.80 * obs[:, 2]
     return a.clamp(-1, 1)
 
 
-def evaluate_controller(mode="fixed", episodes=1024, seed=1024, device="cuda:0"):
-    env = DockEnv(episodes, device=device, seed=seed)
+def evaluate_controller(mode="fixed", episodes=1024, seed=1024, device="cuda:0", **env_kwargs):
+    env = DockEnv(episodes, device=device, seed=seed, **env_kwargs)
     obs = env.reset()
     for _ in range(env.steps - 1):
         obs, _, _, info = env.step(controller(obs, mode))

@@ -1234,3 +1234,7 @@ Human 지시: Claude와 Human이 실증하는 동안 Codex가 이 문제의 원�
 - 보스 후속 지시로, 첫 접시를 넣은 뒤 다음 실행의 고정 RGB-D에서 다시 검출된 바구니 내부 접시는 장애물로 취급한다. YOLOE plate mask와 depth를 base-frame OBB로 만들며, 바구니 pose 내부에 충분한 점이 있는 검출만 채택한다.
 - 기존의 전체 환경/FK 충돌 sweep은 되살리지 않는다. `taught_plan`의 실제 controller spline을 조밀 표본화해 **들고 있는 접시와 live OBB 사이 여유만** 계산하며, 15 mm 미만이면 이동 전에 거부한다. 따라서 sparse waypoint와 one-spline 실행 구조는 유지된다.
 - 오늘 넣었다고 기억한 슬롯 번호를 곧바로 장애물 형상으로 만들지 않는다. 이전 오프라인 시험에서 그 형상은 유효한 Q3:6→Q3:12 경로도 −10 mm로 거부했으며, 보스 지시는 재관측 기반이다. 실제 시연 전에는 바구니 속 edge-on 접시 검출과 OBB 크기를 화면에서 확인해야 한다.
+## 2026-10-29 CT 도킹 관측·종료 판정 수정
+- 정책 관측에 실제 plate normal과 무작위화된 tine lean의 정답 각도를 넣지 않는다. 측면 카메라가 낼 수 있는 plate mask PCA 장축과 검출된 target band의 상대각을 쓰며, 실제 각도는 reward·평가에만 쓴다.
+- 운동학 episode는 접시 밑면이 basket floor에 처음 닿으면 종료한다. floor 아래 상태를 성공으로 세지 않고 pose를 floor에 clamp한 뒤 strict height를 floor+2 mm로 판정한다.
+- wide 조건(행 ±15°, grip ±15 mm, tilt ±3°, basket ±1 cm/±1°)과 Claude CEM 비교용 narrow 조건(행 ±5°, grip ±5 mm, tilt ±2°, basket 고정)을 같은 seed와 Wilson CI로 따로 보고한다. PPO가 P 기준선보다 낮으면 배포 후보로 채택하지 않는다.

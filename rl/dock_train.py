@@ -55,8 +55,8 @@ def wilson(k, n, z=1.959963984540054):
 
 
 @torch.no_grad()
-def evaluate_policy(net, episodes=1024, seed=1024):
-    env = DockEnv(episodes, seed=seed)
+def evaluate_policy(net, episodes=1024, seed=1024, **env_kwargs):
+    env = DockEnv(episodes, seed=seed, **env_kwargs)
     obs = env.reset()
     for _ in range(env.steps - 1):
         obs, _, _, info = env.step(net.deterministic(obs))
@@ -131,23 +131,58 @@ def train(a):
     return net,logs
 
 
+@torch.no_grad()
+def evaluate_details(name, net, episodes, seed, env_kwargs):
+    env=DockEnv(episodes,seed=seed,**env_kwargs); obs=env.reset()
+    for _ in range(env.steps-1):
+        action=net.deterministic(obs) if name=='ppo' else controller(obs,name)
+        obs,_,_,info=env.step(action)
+    ok=info['success']; x,y,h,a,ang=env.criteria()
+    _,_,_,bb,rx,yc,_=env._geometry()
+    lo,hi=wilson(int(ok.sum()),len(ok))
+    return dict(method=name,success=float(ok.float().mean()),lo95=lo,hi95=hi,n=len(ok),
+                pass_x=float(x.float().mean()),pass_y=float(y.float().mean()),
+                pass_height=float(h.float().mean()),pass_angle=float(a.float().mean()),
+                median_x_mm=float((bb[:,0]-rx).abs().median()*1000),
+                median_y_mm=float((bb[:,1]-yc).abs().median()*1000),
+                median_height_mm=float((bb[:,2]-env.floor_z).median()*1000),
+                median_angle_deg=float(ang.median()*180/math.pi))
+
+
+@torch.no_grad()
+def pitch_reachability(episodes=4096,seed=41024):
+    env=DockEnv(episodes,seed=seed); env.reset(); env.t.fill_(env.steps-1)
+    minimum=torch.full((episodes,),float('inf'),device='cuda')
+    for deg in torch.linspace(-15,15,61,device='cuda'):
+        env.residual[:,2]=torch.deg2rad(deg)
+        minimum=torch.minimum(minimum,env.criteria()[4])
+    return dict(n=episodes,pass_angle_reachable=float((minimum<math.radians(20)).float().mean()),
+                median_min_angle_deg=float(minimum.median()*180/math.pi),
+                p90_min_angle_deg=float(torch.quantile(minimum,.9)*180/math.pi))
+
+
 def report(net, logs, out, episodes=1024, seed=1024):
     out=Path(out); rows=[]
-    for name in ('fixed','p'):
-        rate,ok=evaluate_controller(name,episodes,seed)
-        lo,hi=wilson(int(ok.sum()),len(ok)); rows.append(dict(method=name,success=rate,lo95=lo,hi95=hi,n=len(ok)))
-    rate,ok=evaluate_policy(net,episodes,seed); lo,hi=wilson(int(ok.sum()),len(ok))
-    rows.append(dict(method='ppo',success=rate,lo95=lo,hi95=hi,n=len(ok)))
+    conditions={
+        'wide':{},
+        'narrow_h':dict(hang_deg=5,grip_mm=5,tilt_deg=2,basket_xy_mm=0,basket_yaw_deg=0),
+    }
+    for condition,kwargs in conditions.items():
+        for name in ('fixed','p','ppo'):
+            row=evaluate_details(name,net,episodes,seed,kwargs); row['condition']=condition; rows.append(row)
     (out/'comparison.json').write_text(json.dumps(rows,indent=1))
-    (out/'comparison.tsv').write_text('method\tsuccess\tlo95\thi95\tn\n'+''.join(
-        f"{r['method']}\t{r['success']:.6f}\t{r['lo95']:.6f}\t{r['hi95']:.6f}\t{r['n']}\n" for r in rows))
+    cols=('condition','method','success','lo95','hi95','n','pass_x','pass_y','pass_height','pass_angle',
+          'median_x_mm','median_y_mm','median_height_mm','median_angle_deg')
+    (out/'comparison.tsv').write_text('\t'.join(cols)+'\n'+''.join(
+        '\t'.join(str(r[c]) for c in cols)+'\n' for r in rows))
+    reach=pitch_reachability(); (out/'pitch_reachability.json').write_text(json.dumps(reach,indent=1))
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
     fig,ax=plt.subplots(figsize=(6.4,3.6)); ax.plot([r['samples'] for r in logs],[r['success'] for r in logs],lw=1.8)
     ax.set_xlabel('environment steps'); ax.set_ylabel('kinematic strict success')
     ax.spines[['top','right']].set_visible(False); fig.tight_layout(); fig.savefig(out/'learning_curve.png',dpi=180); plt.close(fig)
-    print(json.dumps(rows,indent=1)); return rows
+    print(json.dumps(dict(comparison=rows,pitch_reachability=reach),indent=1)); return rows
 
 
 def main():

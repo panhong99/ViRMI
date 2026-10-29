@@ -87,6 +87,93 @@ BASKET_JSON = ['']          # (10/29) the basket measured at the start (calibrat
 MOVER_GO = ['--opening_done', '--auto']   # (보스 10/29) this script's own Enter / command starts a step; its legs then run
                             # on without the mover's 'start' + Enter per leg (--leg_enter: the old prompts)
 BASKET = {}                 # the last basket plan of this run (basket_plan.py): its path, for 'descend'
+# (보스 10/29) 'basket' alone = the empty quadrant by itself: a bowl into any empty quadrant, plates into an empty Q3 / Q4,
+# the 1st plate front (small pin numbers, far from the robot), the 2nd back in the same quadrant.  What went in is kept in
+# DEMO_STATE across runs (one run = one object); a new day or --new_demo starts it empty.
+DEMO_STATE = Path('/tmp/tesollo_demo_state.json')
+SEEN = {}                   # quadrant -> 'bowl' / 'plate' / None, the fixed camera at the start of this run (empty_quadrant.py)
+BOWL_QUADRANTS = ('Q1', 'Q2', 'Q4', 'Q3')       # far ones first: Q3 / Q4 stay free for the plates
+PLATE_QUADRANTS = ('Q3', 'Q4')
+PINS = 12                   # pins per Q3 / Q4 row; pin 1 = farthest from the robot
+# as pipeline.region_pins (min spacing 4 as the gripper demo).  The gripper's first pins (config Q4 front 3, back 10) do
+# not plan for the hand (10/29 live basket, --wrist_less 45: Q3 front 6, back 12-10; Q4 front 6 / 5, back 12 / 11 plan;
+# Q3 1-5, Q4 1-4 and 10 refused): front starts at the middle (6), back at the nearest (12)
+FRONT_FIRST, BACK_FIRST, SPACING = {}, {}, 4
+
+
+def load_state():
+    try:
+        st = json.loads(DEMO_STATE.read_text())
+    except (OSError, ValueError):
+        st = {}
+    return st if st.get('date') == time.strftime('%Y-%m-%d') else {'date': time.strftime('%Y-%m-%d'), 'bowls': [], 'plates': []}
+
+
+def save_state(st):
+    DEMO_STATE.write_text(json.dumps(st))
+
+
+def see_quadrants():
+    """Bowls / plates already in the basket quadrants (fixed camera, arm home) -> SEEN."""
+    out = subprocess.run([str(PLAN_PY), str(REPO / 'tesollo/empty_quadrant.py'), '--basket', BASKET_JSON[0]],
+                         capture_output=True, text=True)
+    m = re.search(r'^RESULT (.+)$', out.stdout, re.M)
+    if out.returncode or not m:
+        print(f'   quadrants not seen (only the remembered ones count):\n{out.stderr[-400:]}', flush=True)
+        return
+    SEEN.update(json.loads(m.group(1)))
+    print(out.stdout.strip().splitlines()[-2], flush=True)
+
+
+def front_pins(q, taken):
+    top = min(taken) - SPACING if taken else FRONT_FIRST.get(q, PINS // 2)
+    cand = list(range(top, 0, -1)) + ([] if taken else list(range(top + 1, PINS // 2 + 1)))
+    return [c for c in cand if all(abs(c - t) >= SPACING for t in taken)]
+
+
+def back_pins(q, taken):
+    cand = list(range(PINS, PINS // 2, -1))
+    if q in BACK_FIRST:
+        cand = [c for c in cand if c <= BACK_FIRST[q]] + sorted(c for c in cand if c > BACK_FIRST[q])
+    return [c for c in cand if all(abs(c - t) >= SPACING for t in taken)]
+
+
+def auto_targets(obj):
+    """[(quadrant, pin, why)] to try in order for 'basket' alone."""
+    st = load_state()
+    plate_q = [p_['q'] for p_ in st['plates']]
+    full = {q for q, v in SEEN.items() if v} | set(st['bowls'])
+    if obj == 'bowl':
+        return [(q, 6, 'empty') for q in BOWL_QUADRANTS if q not in full and q not in plate_q]
+    if plate_q and plate_q.count(plate_q[-1]) == 1:            # the 2nd plate: back of the 1st one's quadrant
+        q = plate_q[-1]
+        taken = [p_['pin'] for p_ in st['plates'] if p_['q'] == q]
+        return [(q, pin, f'back (front plate at pin {taken[0]})') for pin in back_pins(q, taken)]
+    return [(q, pin, 'front') for q in PLATE_QUADRANTS if q not in full and q not in plate_q for pin in front_pins(q, [])]
+
+
+def record(obj, quadrant, pin):
+    st = load_state()
+    if obj == 'bowl':
+        st['bowls'].append(quadrant)
+    else:
+        st['plates'].append({'q': quadrant, 'pin': pin})
+    save_state(st)
+    print(f'   remembered: bowls {st["bowls"]}, plates {[(p_["q"], p_["pin"]) for p_ in st["plates"]]} ({DEMO_STATE})', flush=True)
+
+
+def auto_basket(obj, centre_h=None):
+    """'basket' alone: the first target that plans, then lift + carry + descend."""
+    targets = auto_targets(obj)
+    if not targets:
+        print(f'   no empty quadrant left for a {obj} (seen {SEEN}, remembered {load_state()}); '
+              '"basket Q.. pin" picks one by hand', flush=True)
+        return
+    for q, pin, why in targets[:8]:
+        print(f'   -> {obj} into {q}' + (f' pin {pin} ({why})' if obj == 'plate' else f' ({why})'), flush=True)
+        if basket(obj, q, pin, centre_h) is not None:
+            return
+    print('   none of these planned; "basket Q.. pin" picks one by hand', flush=True)
 
 
 def mover(plan, leg, v):
@@ -102,7 +189,7 @@ def mover(plan, leg, v):
 def basket(obj, quadrant, pin, centre_h=None):
     """While the object is held: basket_plan.py (plate: plate_plans' basket planner with the Tesollo grasp, into the pins;
     bowl: upright into the middle of a quadrant), then lift, to_above and descend (Enter per leg); BASKET['down'] once
-    the descend has run, so 'release' knows the object is in the basket."""
+    the descend has run, so 'release' knows the object is in the basket.  -> None: no plan, False: a leg stopped, True."""
     out = subprocess.run([str(PLAN_PY), str(REPO / 'tesollo/basket_plan.py'), '--object', obj, '--quadrant', quadrant,
                           '--pin', str(pin), '--dx', str(SHIFT[0]), '--dy', str(SHIFT[1])]
                          + (['--centre_h', str(centre_h)] if centre_h is not None else [])
@@ -113,8 +200,8 @@ def basket(obj, quadrant, pin, centre_h=None):
     m = re.search(r'^plan: (\S+)', out.stdout, re.M)
     if out.returncode or not m:
         print(f'   basket plan failed:\n{out.stdout[-600:]}{out.stderr[-600:]}', flush=True)
-        return
-    BASKET['plan'] = m.group(1)
+        return None
+    BASKET['plan'], BASKET['target'] = m.group(1), (obj, quadrant, pin)
     print(f'   basket plan {m.group(1)} (after the release: ascend, to_home with run.sh mover)', flush=True)
     BASKET['down'] = False
     mg = re.search(r'^merged: (\S+plan\.json)', out.stdout, re.M)
@@ -122,9 +209,11 @@ def basket(obj, quadrant, pin, centre_h=None):
     legs = [(mg.group(1), 'lift_carry'), (m.group(1), 'descend')] if mg else [(m.group(1), lg) for lg in BASKET_LEGS]
     for plan, leg in legs:
         if not mover(plan, leg, VEL[0]):
-            return
+            return False
     BASKET['down'] = True
+    record(*BASKET['target'])
     print('   in the basket: type "release"', flush=True)
+    return True
 
 
 def arm_legs(obj, legs):
@@ -195,6 +284,7 @@ def main():
                                                   '(absolute path); use after tesollo/measure_held.py')
     p.add_argument('--wrist_less', type=float, default=45.0, help='(plate) turn the hand this much less from the grasp to the '
                    'insert than the flat-plate plan [deg] (보스 10/29: 45; 0 = the old plan)')
+    p.add_argument('--new_demo', action='store_true', help='forget the bowls / plates put in the basket earlier today')
     p.add_argument('--leg_enter', action='store_true', help='(old) the mover asks "start" and Enter before every arm leg')
     p.add_argument('--vel', type=float, default=80.0, help='arm speed deg/s (= deg/s^2) for every arm leg (default 80)')
     p.add_argument('--motion_ms', type=int, default=3000, help='time per pose move [ms] (slow)')
@@ -208,6 +298,13 @@ def main():
         BASKET_JSON[0] = str(Path(a.basket_json).resolve())
     elif a.object and not a.fixed_basket:
         measure_basket()
+    if a.new_demo:
+        DEMO_STATE.unlink(missing_ok=True)
+    if a.object and BASKET_JSON[0]:
+        see_quadrants()                                          # arm home, the basket in view
+        st = load_state()
+        print(f'remembered in the basket today: bowls {st["bowls"]}, plates {[(p_["q"], p_["pin"]) for p_ in st["plates"]]}'
+              ' (--new_demo clears)', flush=True)
     if a.object == 'auto':
         a.object, SHIFT[0], SHIFT[1] = perceive()
         if input(f'\nseen: {a.object}, {SHIFT[0] * 1000:+.0f} / {SHIFT[1] * 1000:+.0f} mm from the taught spot.  '
@@ -323,8 +420,9 @@ def main():
                 show()
         # (보스 10/27) keep the grasp while the arm lifts and goes home in the other terminal: only the typed word
         # 'release' opens the hand; Enter shows joints / currents / temperature, Ctrl+C and q do NOT let go here
-        print('\n3. HOLDING.  "home" = lift + home;  "basket Q3 6" (plate, quadrant / pin) or "basket Q1" (bowl) = lift + '
-              'carry + down into the basket (Enter per leg);  then "release" = let go -> hand open -> ascend + home.  '
+        print('\n3. HOLDING.  "home" = lift + home;  "basket" = the empty quadrant by itself (bowl: any empty one; plate: '
+              '1st front, 2nd back of the same Q3 / Q4), "basket Q3 6" / "basket Q1" = by hand: lift + carry + down into '
+              'the basket;  then "release" = let go -> hand open -> ascend + home.  '
               'Enter = joints / temperature.', flush=True)
         while True:
             try:
@@ -336,15 +434,19 @@ def main():
                     break
                 if cmd == 'home' and a.object:
                     arm_legs(a.object, ARM_HOME)
+                elif cmd == 'basket' and a.object:                          # (보스 10/29) the empty quadrant by itself
+                    auto_basket('plate' if a.object == 'plate' else 'bowl')
                 elif cmd.startswith('basket') and a.object:                 # plate: basket Q3 6, bowl: basket Q1
                     w, obj = cmd.split(), 'plate' if a.object == 'plate' else 'bowl'
                     basket(obj, w[1].upper() if len(w) > 1 else ('Q3' if obj == 'plate' else 'Q1'),
                            int(w[2]) if len(w) > 2 else 6, float(w[3]) if len(w) > 3 else None)   # basket Q3 6 0.15 = deeper
                 elif cmd == 'descend' and BASKET:                          # only after a stopped basket run
                     BASKET['down'] = mover(BASKET['plan'], 'descend', VEL[0])
+                    if BASKET['down']:
+                        record(*BASKET['target'])
                 elif cmd:                                       # (10/27) 'basket' with a bowl printed joints silently
                     print(f'   "{cmd}" does nothing here (object {a.object}): "home", "release", '
-                          + ('"basket Q3 6"' if a.object == 'plate' else '"basket Q1"') + ', "descend"; Enter = joints',
+                          + '"basket", ' + ('"basket Q3 6"' if a.object == 'plate' else '"basket Q1"') + ', "descend"; Enter = joints',
                           flush=True)
                     continue
                 show()

@@ -22,7 +22,7 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parent.parent
 PROMPTS = ['bowl', 'ceramic plate', 'red ceramic plate', 'dish drying rack']
-NAME_ALIASES = {'ceramic plate': 'plate', 'red ceramic plate': 'plate'}
+NAME_ALIASES = {'ceramic plate': 'plate', 'red ceramic plate': 'plate', 'white ceramic bowl': 'bowl'}
 COLOURS = {'bowl': (255, 140, 0), 'plate': (60, 200, 255), 'dish drying rack': (180, 180, 180)}   # RGB
 # basket frame (slot frame, z = rim): x robot side -> far side, y left seen from the robot (plate_plans.basket_gaps)
 HALF = (0.265, 0.26)
@@ -39,7 +39,10 @@ class Detector:
 
     def __init__(self, prompts=PROMPTS, zoom=2.0, imgsz=640, half=False):
         from ultralytics import YOLOE
-        self.names, self.zoom = [p for p in prompts if p != 'bowl'], zoom
+        # (보스 10/29: bowls on the table came as 'plate' or nothing) 'bowl' also runs BOWL_PROMPT on the whole frame
+        # (10/29 frame: the blue bowl 0.43 vs plate 0.18, the white one 0.36 vs missed)
+        self.names = [BOWL_PROMPT if p == 'bowl' else p for p in prompts]
+        self.zoom = zoom
         self.output_names = list(dict.fromkeys(NAME_ALIASES.get(p, p) for p in self.names))
         self.imgsz, self.half = int(imgsz), bool(half)
         self.m = YOLOE(str(ROOT / 'yoloe-v8l-seg.pt'))
@@ -253,7 +256,7 @@ def draw_audience(rgb, dets, K, Tbc, Tb, chosen=None):
     polygon = _basket_image_polygon(K, Tbc, Tb)
     for det in audience_objects(dets):
         name, _, (x0, y0, x1, y1), mask = det
-        role = 'obstacle' if name == 'bowl' or _in_basket(det, polygon, img.shape[:2]) else 'target'
+        role = 'obstacle' if _in_basket(det, polygon, img.shape[:2]) else f'target: {name}'   # (보스 10/29) bowls on the table too
         col = np.asarray((245, 80, 70) if role == 'obstacle' else (40, 210, 255), np.uint8)
         if mask is not None and mask.shape == img.shape[:2]:
             img[mask] = (0.72 * img[mask] + 0.28 * col).astype(np.uint8)

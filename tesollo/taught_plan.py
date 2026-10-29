@@ -46,6 +46,10 @@ def main():
     p.add_argument('--dx', type=float, default=0.0)
     p.add_argument('--dy', type=float, default=0.0)
     p.add_argument('--rise', type=float, default=0.30, help='straight lift after the grasp before the carry [m] (보스 10/29: 30 cm)')
+    p.add_argument('--smooth', action='store_true', help='(보스 10/29: the moves looked stepwise) also write carry_insert = grasp -> '
+                   'in the slot as ONE spline with even knots (~--knot_deg apart; the lift a Cartesian knot every 5 cm), slowing '
+                   'into the slot by closer knots, and an even return_home')
+    p.add_argument('--knot_deg', type=float, default=5.0, help='--smooth: joint step between knots [deg]')
     p.add_argument('--wrist_less', type=float, default=25.0, help='turn the hand this much less (grasp -> insert) than taught, '
                    'about the held plate\'s lowest point [deg] (보스 10/29: 25 less is enough for the slot; 0 = as taught)')
     a = p.parse_args()
@@ -137,7 +141,25 @@ def main():
     ins = [a2.tolist(), ((a2 + a3) / 2).tolist(), a3.tolist()]   # the mover needs >= 2 targets after the start (10/29 real:
                                                                  # 2 knots were refused and the plate stopped 1 cm over the slot)
     back = [list(map(float, q)) for q in [pts[-1]] + pts[-2::-1] + [home]]
-    for name, w in (('post_grasp', post), ('insert', ins), ('return_home', back)):
+    legs = [('to_grasp', [home, grasp.tolist()]), ('post_grasp', post), ('insert', ins), ('return_home', back)]
+    if a.smooth:
+        # (보스 10/29) one spline from the grasp into the slot.  The controller spline gives every knot the same time, so
+        # knots ~knot_deg apart keep the speed even (the old 4 / 24 / 27 / 20 deg gaps sped up and slowed 6x inside one
+        # leg); the lift keeps a Cartesian knot every 5 cm (vertical); into the slot the knots close up -> it slows down
+        # there by itself (no stop at 1 cm over the slot, no second mover start)
+        lift, q = [grasp.tolist()], np.radians(grasp)
+        T0 = k.fk(np.radians(grasp))
+        for dz in np.arange(0.05, a.rise + 1e-6, 0.05):
+            T = T0.copy()
+            T[2, 3] += dz
+            q = k.ik(T, q)
+            lift.append(np.degrees(q).tolist())
+        carry = lift + knots([lift[-1]] + [list(map(float, q_)) for q_ in pts[:-1]], a.knot_deg)[1:]
+        n_in = 2                                                 # the last ~1 cm: 2 short steps (~half the carry speed)
+        carry += [(a2 + (a3 - a2) * i / n_in).tolist() for i in range(1, n_in + 1)]
+        back_s = knots(back, a.knot_deg * 1.6)
+        legs += [('carry_insert', carry), ('return_home_smooth', back_s)]
+    for name, w in legs[1:]:
         if len(w) > MAX_KNOTS:
             sys.exit(f'REFUSED: {name} needs {len(w)} knots (> {MAX_KNOTS})')
         W = np.array(w)
@@ -150,8 +172,7 @@ def main():
                 source=f'taught insert #{a.index} {e["quadrant"]} pin {pin} (taught pin {e["pin"]}, {e["time"]}), {note}; '
                        'sparse, no collision sweep', basket_T=Tn.tolist(), plate_in_tcp=e.get('plate_in_tcp'), tool_length_m=0.12,
                 legs={n: dict(waypoints_deg=np.round(w, 3).tolist(), min_clearance_straight_m=0.0, planner='taught sparse')
-                      for n, w in (('to_grasp', [home, grasp.tolist()]), ('post_grasp', post), ('insert', ins),
-                                   ('return_home', back))})
+                      for n, w in legs})
     out = pp.DATA / 'rl_plans' / (time.strftime('%Y%m%d_%H%M%S') + f'_{int(time.time() * 1000) % 1000:03d}_hand_taught')
     out.mkdir(parents=True, exist_ok=True)
     (out / 'plan.json').write_text(json.dumps(plan, indent=1))
@@ -159,7 +180,7 @@ def main():
     print(f'OK: taught {e["quadrant"]} pin {pin}: post_grasp {len(post)} knots (grasp, up 5 / {a.rise * 100:.0f} cm, teach 1, '
           f'teach 2), insert 3 knots, return_home {len(back)} knots; carry flange over the basket >= '
           f'{min(inside) * 100 if inside else float("nan"):.0f} cm over the rim (TCP not checked)')
-    for n in ('post_grasp', 'insert', 'return_home'):
+    for n in [n_ for n_, _ in legs[1:]]:
         print(f'  {n}: {len(plan["legs"][n]["waypoints_deg"])} waypoints, end {plan["legs"][n]["waypoints_deg"][-1]}')
     print('plan:', out / 'plan.json')
 

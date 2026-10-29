@@ -122,6 +122,8 @@ BASKET_JSON = ['']          # (10/29) the basket measured at the start (calibrat
 MOVER_GO = ['--opening_done', '--auto']   # (보스 10/29) this script's own Enter / command starts a step; its legs then run
                             # on without the mover's 'start' + Enter per leg (--leg_enter: the old prompts)
 TAUGHT_LESS = [25.0]        # (보스 10/29) the taught insert's wrist turned back this much (--taught_wrist_less)
+SMOOTH = [True]             # (보스 10/29: stepwise look) one even-knot spline grasp -> in the basket, softer acc (--stepwise = old)
+ACC = [0.5]                 # acc [deg/s^2] = this x vel on every arm leg (--acc_ratio; --stepwise: 1)
 LIFT_M = [0.30]             # (보스 10/29) straight up after the grasp, bowl or plate (--lift)
 PRE_PLAN = {}               # the first basket target's plan, started while the hand closes (보스 10/29: too slow after the grasp)
 BASKET = {}                 # the last basket plan of this run (basket_plan.py): its path, for 'descend'
@@ -233,7 +235,7 @@ def auto_basket(obj, centre_h=None):
 def mover(plan, leg, v, extra=()):
     """One mover leg (Enter to go); True if it ran."""
     r = subprocess.run(['bash', str(REPO / 'calibration/run.sh'), 'mover', '--plan', plan, '--leg', leg, '--smooth',
-                        '--go_per', 'leg', '--vel_deg_s', str(v), '--acc_deg_s2', str(v), '--execute', '--go_enter']
+                        '--go_per', 'leg', '--vel_deg_s', str(v), '--acc_deg_s2', str(v * ACC[0]), '--execute', '--go_enter']
                        + MOVER_GO + list(extra))
     if r.returncode:
         print(f'   mover stopped at {leg} (exit {r.returncode})', flush=True)
@@ -245,11 +247,11 @@ def plan_cmd(obj, quadrant, pin, centre_h=None):
     if TAUGHT_IX[0] is not None and obj == 'plate':      # (보스 10/29) the pendant-taught insert, one sparse spline after
         return ([str(PLAN_PY), str(REPO / 'tesollo/taught_plan.py'), '--index', str(TAUGHT_IX[0]),    # the grasp
                  '--quadrant', quadrant, '--pin', str(pin), '--dx', str(SHIFT[0]), '--dy', str(SHIFT[1]),
-                 '--rise', str(LIFT_M[0]), '--wrist_less', str(TAUGHT_LESS[0])]
+                 '--rise', str(LIFT_M[0]), '--wrist_less', str(TAUGHT_LESS[0])] + (['--smooth'] if SMOOTH[0] else [])
                 + (['--basket', BASKET_JSON[0]] if BASKET_JSON[0] else []))
     return ([str(PLAN_PY), str(REPO / 'tesollo/basket_plan.py'), '--object', obj, '--quadrant', quadrant,
              '--pin', str(pin), '--dx', str(SHIFT[0]), '--dy', str(SHIFT[1])]
-            + (['--rise', str(LIFT_M[0])] if obj != 'plate' else [])
+            + (['--rise', str(LIFT_M[0])] + (['--smooth'] if SMOOTH[0] else []) if obj != 'plate' else [])
             + (['--centre_h', str(centre_h)] if centre_h is not None else [])
             + (['--sim_corr', SIM_CORR[0]] if SIM_CORR[0] and obj == 'plate' else [])
             + (['--wrist_less', str(WRIST_LESS[0])] if WRIST_LESS[0] and obj == 'plate' and not GRIPPER[0] else [])
@@ -296,10 +298,13 @@ def basket(obj, quadrant, pin, centre_h=None):
     legs = [(mg.group(1), 'lift_carry'), (m.group(1), 'descend')] if mg else [(m.group(1), lg) for lg in BASKET_LEGS]
     if 'post_grasp' in planned_legs:                    # (보스 10/29) grasp -> 1 cm over the slot as ONE spline, then the
         legs = [(m.group(1), 'post_grasp'), (m.group(1), 'insert')]   # insert alone at --insert_vel (taught_plan.py)
+    for one, back in (('carry_insert', 'return_home_smooth'), ('carry_down', 'up_home')):
+        if SMOOTH[0] and one in planned_legs:          # (보스 10/29) grasp -> in the basket as ONE even spline
+            legs, BASKET['out_leg'] = [(m.group(1), one)], back
     if TEACH[0] and obj == 'plate' and TAUGHT_IX[0] is None:   # (보스 10/29) only up to above the basket; the pendant inserts
         legs = [(teach_stop(m.group(1), mg.group(1) if mg else None), 'lift_carry')]
     for plan, leg in legs:
-        sparse = leg in ('post_grasp', 'insert', 'return_home')   # few knots: the controller spline smooths them
+        sparse = leg in ('post_grasp', 'insert', 'return_home', 'carry_insert', 'carry_down')   # few knots: the controller spline smooths them
         if not mover(plan, leg, INSERT_VEL[0] if leg == 'insert' else VEL[0], ['--max_step_deg', '90'] if sparse else []):
             return False
     if TEACH[0] and obj == 'plate' and TAUGHT_IX[0] is None and not teach_insert(m.group(1), quadrant, pin):
@@ -408,7 +413,7 @@ def arm_legs(obj, legs):
         v = VEL[0]
         name = f'{"plate" if obj == "plate" else "bowl"}_{leg}'
         r = subprocess.run(['bash', str(REPO / 'calibration/run.sh'), 'mover', '--plan', m.group(1), '--leg', name,
-                            '--smooth', '--go_per', 'leg', '--vel_deg_s', str(v), '--acc_deg_s2', str(v),
+                            '--smooth', '--go_per', 'leg', '--vel_deg_s', str(v), '--acc_deg_s2', str(v * ACC[0]),
                             '--execute', '--go_enter'] + MOVER_GO)
         if r.returncode:
             print(f'   mover stopped at {name} (exit {r.returncode})', flush=True)
@@ -492,11 +497,16 @@ def main():
                    'leaned back than taught, plate bottom kept on the slot [deg] (보스 10/29: 25; 0 = as taught)')
     p.add_argument('--open_first', action='store_true', help='(old) open the hand in the basket before the arm goes home '
                    '(default: release, arm home, then open - 보스 10/29)')
+    p.add_argument('--stepwise', action='store_true', help='(old) post-grasp legs as before: plate stops 1 cm over the slot '
+                   'and inserts at --insert_vel, bowl stops above its quadrant; acc = vel')
+    p.add_argument('--acc_ratio', type=float, default=0.5, help='arm acc [deg/s^2] = this x --vel (보스 10/29: softer starts / '
+                   'stops; --stepwise: 1)')
     p.add_argument('--approach_stop', action='store_true', help='(old) the arm stops above the object before going down')
     p.add_argument('--motion_ms', type=int, default=3000, help='time per pose move [ms] (slow)')
     a = p.parse_args()
     VEL[0] = a.vel
     LIFT_M[0], TAUGHT_LESS[0] = a.lift, a.taught_wrist_less
+    SMOOTH[0], ACC[0] = not a.stepwise, 1.0 if a.stepwise else a.acc_ratio
     ARM_APPROACH[:] = ['above', 'down'] if a.approach_stop else ARM_APPROACH
     TEACH[0] = a.teach
     INSERT_VEL[0] = a.insert_vel
@@ -752,8 +762,9 @@ def main():
                 if BASKET and ((BASKET.get('down') and AUTO[0]) or
                                input('\n5. arm: ascend + home with the basket plan?  Enter = go, n = no: ').strip().lower() != 'n'):
                     out_leg = BASKET.get('out_leg', 'ascend')
-                    moved = mover(BASKET['plan'], out_leg, VEL[0], ['--max_step_deg', '90'] if out_leg == 'return_home' else [])
-                    if moved and out_leg != 'return_home':
+                    one = out_leg in ('return_home', 'return_home_smooth', 'up_home')
+                    moved = mover(BASKET['plan'], out_leg, VEL[0], ['--max_step_deg', '90'] if one else [])
+                    if moved and not one:
                         mover(BASKET['plan'], 'to_home', VEL[0])
             except EOFError:
                 pass

@@ -15,7 +15,8 @@
    ├ 바구니 위치 측정(basket_vision)  ├ 바구니 칸 상태(empty_quadrant: 그릇·꽂힌 접시)  └ 물체 종류·위치(perceive)
 팔 접근: 홈 → 물체 위 → 수직 하강 (스플라인 1개, arm_plan)
 손: 준비 자세 → 마지막 파지 자세 쪽으로 천천히 닫기 → 힘 파지 (한 동작)
-파지 후: 수직 30 cm 상승 → 바구니 빈 칸 위 → (접시) 슬롯 1 cm 위 → 40°/s로 삽입   (경로는 손이 닫히는 동안 미리 계산)
+파지 후: 수직 30 cm 상승 → 바구니 빈 칸 위 → (접시) 슬롯 안 / (그릇) 칸 안 — 스플라인 1개, 고른 간격 경유점,
+        끝부분만 경유점을 촘촘히 해서 감속   (경로는 손이 닫히는 동안 미리 계산)
 놓기 → 손 모양 그대로 홈 복귀 → 손 펴기
 ```
 
@@ -31,6 +32,7 @@
 bash ~/pan/6D_pose/calibration/run.sh connect
 
 # 터미널 2: 시연 (관객 화면이 같이 뜸; 물체를 보면 끝까지 자동)
+# 안전 시연(설정 고정, 바구니 측정 생략, 10/29 실기 동작): bash ~/pan/6D_pose/tesollo/demo_safe.sh [--new_demo]
 ~/miniconda3/bin/python3 ~/pan/6D_pose/tesollo/dg5fs_sdk.py --object auto --vel 60
 ```
 
@@ -47,6 +49,8 @@ bash ~/pan/6D_pose/calibration/run.sh connect
 | `--new_demo` | 오늘 넣은 것 기억 지우기 (바구니를 비웠을 때) |
 | `--hold` / `--step` | 파지 후 멈춤 / 단계마다 Enter |
 | `--teach` | 바구니 위에서 멈추고 펜던트로 삽입 티칭, Enter마다 관절 기록 |
+| `--acc_ratio 0.5` | 가속도 = 속도 × 이 값 (출발·정지 부드럽게) |
+| `--stepwise` | 파지 후를 예전처럼 구간별로 (접시: 슬롯 1 cm 위 정지 후 40°/s 삽입, 그릇: 칸 위 정지), 가속도 = 속도 |
 | `--approach_stop`, `--preclose 0`, `--taught_wrist_less 0`, `--open_first` | 이전 동작으로 되돌리기 (디버깅용) |
 
 ### A-2. 따로 돌려 보기 (로봇 안 움직임, `~/pan/6D_pose`에서)

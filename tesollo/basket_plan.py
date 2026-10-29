@@ -296,6 +296,20 @@ def bowl_plan(a, k, Tbb, Tbc):
     for q in list(lift) + list(down) + carry + [home]:
         assert ((q > lo + 3) & (q < hi - 3)).all(), f'joint limit {np.round(q, 1)}'
     legs = {'lift': lift, 'to_above': carry, 'descend': down, 'ascend': down[::-1], 'to_home': [above, home]}
+    if getattr(a, 'smooth', False):
+        # (보스 10/29: the moves looked stepwise) grasp -> down in the quadrant as ONE spline, <= 20 knots: the lift a
+        # Cartesian knot every 10 cm, the carry / descent joint lines cut into even steps (the controller spline gives
+        # every knot the same time: even steps = even speed; the descent's shorter steps slow it into the basket)
+        lift_s = lift_line(k, grasp, a.rise, n=int(round(a.rise / 0.10)) + 1)
+        n_c = int(np.ceil(np.abs(above - lift_s[-1]).max() / 14.0))
+        n_d = 3
+        carry_s = [lift_s[-1] + s_ * (above - lift_s[-1]) for s_ in np.linspace(0, 1, n_c + 1)[1:]]
+        down_s = [above + s_ * (np.array(down[-1]) - above) for s_ in np.linspace(0, 1, n_d + 1)[1:]]
+        legs['carry_down'] = list(lift_s) + carry_s + down_s
+        n_h = int(np.ceil(np.abs(home - above).max() / 22.0))
+        legs['up_home'] = [down[-1]] + [down[-1] + s_ * (above - np.array(down[-1])) for s_ in np.linspace(0, 1, n_d + 1)[1:]] \
+            + [above + s_ * (home - above) for s_ in np.linspace(0, 1, n_h + 1)[1:]]
+        assert len(legs['carry_down']) <= 20, f'carry_down {len(legs["carry_down"])} knots'
     print(f'basket {Tbb[:3, 3].round(3).tolist()}; bowl into {a.quadrant} (model {model_qd}) at {target.round(3).tolist()} '
           f'(bottom {BOWL_DROP_M * 100:.0f} cm over the rim)', flush=True)
     return pp.taught_plan({n: [list(map(float, w)) for w in v] for n, v in legs.items()}, Tbc, pp.C['plate_ik_bc'],
@@ -403,6 +417,8 @@ def main():
     p.add_argument('--wrist', type=float, nargs=3, help='--gripper_path: J4 J5 J6 offset [deg] on the gripper joints '
                    '(default: hand - gripper at the lift end)')
     p.add_argument('--plates', nargs='*', default=[], help='--gripper_path: plates already in the basket, Q3:6 ...')
+    p.add_argument('--smooth', action='store_true', help='(bowl) also write carry_down (grasp -> in the quadrant, one '
+                   'spline, even knots) and up_home (보스 10/29)')
     p.add_argument('--rise', type=float, default=PLATE_RISE_M,
                    help='plate lift before the carry [m] (default 0.14 = two 7 cm moves, three knots)')
     p.add_argument('--basket', default=str(FIXED_BASKET), help='basket_vision.json (T); default the fixed 11/3 file (stale: '

@@ -3,6 +3,7 @@
 #   bash ~/pan/6D_pose/tesollo/demo_safe.sh              # as it is (remembers what is in the basket today)
 #   bash ~/pan/6D_pose/tesollo/demo_safe.sh --new_demo   # the basket emptied: forget today's bowls / plates
 # Before: robot connected (bash ~/pan/6D_pose/calibration/run.sh connect, control on the PC), hand on, DGManager closed.
+# --stepwise: the post-grasp moves as tested on 10/29 (the newer one-spline path is the default of dg5fs_sdk.py itself).
 # The code is the one tagged demo-safe-20261029; if a demo file changed since, it says so and asks before going on.
 set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -23,4 +24,5 @@ exec ~/miniconda3/bin/python3 "$REPO/tesollo/dg5fs_sdk.py" \
   --taught 0 --taught_wrist_less 25 \
   --vel 60 --insert_vel 40 --lift 0.30 \
   --grasp_ms 3000 --motion_ms 3000 \
+  --stepwise \
   "$@"

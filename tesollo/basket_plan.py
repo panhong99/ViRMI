@@ -194,6 +194,9 @@ def main():
     p.add_argument('--sim_corr', default='', help='(opt-in) rl/hand_basket.py cem json: this pin\'s learned (dx, dy, dz) in the '
                                                   'basket frame -> x_shift (on the config trim), y_extra, centre_h + dz.  Learned '
                                                   'for one nominal hang with a measured in-hand pose: use with measure_held.py')
+    p.add_argument('--wrist_less', type=float, default=0.0,
+                   help='(opt-in, 보스 10/29) turn the hand this much less from the grasp to the insert [deg], about the plate '
+                        'bottom on the slot (the flat-plate model turns ~96; the real plate needs ~45 less)')
     p.add_argument('--rise', type=float, default=0.12, help='lift before the carry (arm_plan.py lift)')
     p.add_argument('--basket', default=str(FIXED_BASKET), help='basket_vision.json (T); default the fixed 11/3 file (stale: '
                                                                 'measure it, see dg5fs_sdk.py / calibration/basket_vision.py)')
@@ -308,6 +311,65 @@ def main():
             sys.exit(f'REFUSED --sim_corr {a.quadrant}:{a.pin}: the moved path fails the planner collision gate '
                      f'(carry {c_h:.2f}, insert {c_i:.2f} < 1)')
         plan['source'] += f' + sim correction {a.quadrant}:{a.pin} {np.round(np.array(d) * 1000, 1).tolist()} mm'
+        Path(path).write_text(json.dumps(plan, indent=1))
+    if path is not None and a.wrist_less:
+        # (보스 10/29 real Q3 photo) the slot position is right but the plate leans ~45 deg: the flat-plate model turns the
+        # hand ~96 deg from the grasp, the real held plate needs about 45 less.  The hand turn (grasp -> insert, about its
+        # own axis) is cut by --wrist_less about the model plate's lowest point (stays on the slot), full on the descent /
+        # ascent and ramped in over to_above.  H then follows the real plate: upright where the model plate was.
+        from scipy.spatial.transform import Rotation
+        from robot_model import polyline_path
+        plan = json.loads(Path(path).read_text())
+        L = plan['legs']
+        cloud = pp.plate_cloud(H, tool)
+        tcp = lambda qq: k.fk(np.radians(qq)) @ tool                                     # noqa: E731
+        Tg, Ti = tcp(grasp), tcp(L['descend']['waypoints_deg'][-1])
+        rv = Rotation.from_matrix(Tg[:3, :3].T @ Ti[:3, :3]).as_rotvec()
+        turn = np.degrees(np.linalg.norm(rv))
+        axis = Ti[:3, :3] @ (rv / np.linalg.norm(rv))                                    # base frame
+
+        def turned(w, frac):
+            out, prev = [], np.radians(w[0])
+            for qq, f in zip(w, frac):
+                F = k.fk(np.radians(qq))
+                piv = (cloud @ F[:3, :3].T + F[:3, 3])
+                piv = piv[np.argmin(piv[:, 2])]
+                Rb = Rotation.from_rotvec(-axis * np.radians(f * a.wrist_less)).as_matrix()
+                T = F.copy()
+                T[:3, :3] = Rb @ F[:3, :3]
+                T[:3, 3] = Rb @ (F[:3, 3] - piv) + piv
+                qn = k.ik(T, prev)
+                assert qn is not None and np.abs(k.fk(qn)[:3, 3] - T[:3, 3]).max() < 1e-3, 'IK failed turning the wrist'
+                out.append(np.degrees(qn).tolist())
+                prev = qn
+            assert np.abs(np.diff(np.array(out), axis=0)).max() < 15, 'IK jump turning the wrist'
+            return out
+        F_old = tcp(L['descend']['waypoints_deg'][-1])
+        for leg in ('descend', 'ascend'):
+            L[leg]['waypoints_deg'] = turned(L[leg]['waypoints_deg'], np.ones(len(L[leg]['waypoints_deg'])))
+        # the carry ramps into the turned above pose in joint space (a Cartesian ramp crossed J5 ~ 0: J4/J6 flipped 29 deg)
+        w = np.array(L['to_above']['waypoints_deg'])
+        dq = np.array(L['descend']['waypoints_deg'][0]) - w[-1]
+        L['to_above']['waypoints_deg'] = (w + np.linspace(0, 1, len(w))[:, None] * dq).tolist()
+        for leg in ('to_home', 'abort_home'):
+            if leg in L:
+                L[leg]['waypoints_deg'][0] = L['ascend']['waypoints_deg'][-1]
+        F_new = tcp(L['descend']['waypoints_deg'][-1])
+        H_real = np.linalg.inv(F_new) @ F_old @ H                  # the real plate (tool frame): where the model plate was
+        held, inserting, _ = pp.quadrant_checkers(Tbc, q, Tbb, H_real, tool)
+        c_h = held.path_clearance(polyline_path(np.radians(np.array(L['to_above']['waypoints_deg'])), 0.5))
+        c_i = inserting.path_clearance(polyline_path(np.radians(np.array(L['descend']['waypoints_deg'])), 0.5))
+        rv2 = Rotation.from_matrix(Tg[:3, :3].T @ F_new[:3, :3]).as_rotvec()
+        print(f'wrist: hand turn {turn:.1f} -> {np.degrees(np.linalg.norm(rv2)):.1f} deg (--wrist_less {a.wrist_less}); '
+              f're-check carry clearance/margin {c_h:.2f}, insert {c_i:.2f}', flush=True)
+        # the real plate on the lift (unchanged, 보스 has run it) already sits under 1 against the cell (0.80-0.82 at
+        # Q3:6, 10/29): the turned carry must not go below that lift, and the descent keeps the full gate
+        c_ref = min(1.0, held.path_clearance(polyline_path(np.radians(np.array(L['lift']['waypoints_deg'][1:])), 0.5)))
+        print(f'   the lift (unchanged, the real plate) {c_ref:.2f}', flush=True)
+        if c_h < c_ref - 0.05 or c_i < 1.0:                       # 0.05 = ~3 mm at the frame margin
+            sys.exit(f'REFUSED --wrist_less {a.wrist_less}: the turned path fails the planner collision gate '
+                     f'(carry {c_h:.2f}, insert {c_i:.2f} < 1)')
+        plan['source'] += f' + wrist {-a.wrist_less:+.0f} deg'
         Path(path).write_text(json.dumps(plan, indent=1))
     if path is None:
         sys.exit(f'NO PLAN: ' + str(__import__('collections').Counter(t[1].split(' ')[0] for t in rep.get('tried', []))) + f' over {len(rep.get("tried", []))} tries')

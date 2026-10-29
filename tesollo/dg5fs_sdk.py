@@ -82,6 +82,7 @@ def perceive():
 
 SHIFT = [0.0, 0.0]          # object shift from the taught spot (perceive), applied to every arm plan of this run
 SIM_CORR = ['']             # (--sim_corr) rl/hand_basket.py CEM json passed to basket_plan.py for the plate
+WRIST_LESS = [45.0]         # (보스 10/29 real Q3 photo) plate: the hand turns this much less than the flat-plate plan
 BASKET_JSON = ['']          # (10/29) the basket measured at the start (calibration/basket_vision.py), for every basket plan
 BASKET = {}                 # the last basket plan of this run (basket_plan.py): its path, for 'descend'
 
@@ -103,8 +104,9 @@ def basket(obj, quadrant, pin, centre_h=None):
                           '--pin', str(pin), '--dx', str(SHIFT[0]), '--dy', str(SHIFT[1])]
                          + (['--centre_h', str(centre_h)] if centre_h is not None else [])
                          + (['--sim_corr', SIM_CORR[0]] if SIM_CORR[0] and obj == 'plate' else [])
+                         + (['--wrist_less', str(WRIST_LESS[0])] if WRIST_LESS[0] and obj == 'plate' else [])
                          + (['--basket', BASKET_JSON[0]] if BASKET_JSON[0] else []), capture_output=True, text=True)
-    print('\n'.join(l for l in out.stdout.splitlines() if l.startswith(('basket', 'OK', '  ', 'merged'))), flush=True)
+    print('\n'.join(l for l in out.stdout.splitlines() if l.startswith(('basket', 'OK', '  ', 'merged', 'wrist'))), flush=True)
     m = re.search(r'^plan: (\S+)', out.stdout, re.M)
     if out.returncode or not m:
         print(f'   basket plan failed:\n{out.stdout[-600:]}{out.stderr[-600:]}', flush=True)
@@ -188,10 +190,13 @@ def main():
     p.add_argument('--fixed_basket', action='store_true', help='(old) the fixed 11/3 basket file + the 10/27 by-eye shifts')
     p.add_argument('--sim_corr', default='', help='(opt-in, plate) learned insert correction json from rl/hand_basket.py cem '
                                                   '(absolute path); use after tesollo/measure_held.py')
+    p.add_argument('--wrist_less', type=float, default=45.0, help='(plate) turn the hand this much less from the grasp to the '
+                   'insert than the flat-plate plan [deg] (보스 10/29: 45; 0 = the old plan)')
     p.add_argument('--vel', type=float, default=80.0, help='arm speed deg/s (= deg/s^2) for every arm leg (default 80)')
     p.add_argument('--motion_ms', type=int, default=3000, help='time per pose move [ms] (slow)')
     a = p.parse_args()
     VEL[0] = a.vel
+    WRIST_LESS[0] = a.wrist_less
     SIM_CORR[0] = str(Path(a.sim_corr).resolve()) if a.sim_corr else ''
     held = None
     if a.basket_json:

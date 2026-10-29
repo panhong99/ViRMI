@@ -5654,3 +5654,11 @@ plate 삽입 +y 5 cm, 손목 회전 30–45° 이내, 오늘 밤 sim에서 핸�
 5. 슬롯 읽기 (`50ea077`): 측면 사진 → 분면 crop → CNN tip → 등간격 필터 → 먼 쪽부터 빗살 번호(줄당 13개, 아니면 '모호') → 핀 k 띠. 실사진에서 Q3·Q4 모두 13+13 번호, 핀 1 띠(보스 그림과 같은 위치) `outputs/side_cam_q3_20261029/band_Q*_pin1.png`. 하강 중 접시가 빗살을 가리면 13개가 안 보이므로, 하강 전(접시가 슬롯 위)에 띠를 정하고 하강 중에는 접시만 보는 방식으로 쓸 것.
 6. **발견: 바구니 모델 Q4 빗살 간격이 실제와 다르다** (`experiments/side_cam/tine_positions.py`, 측면 사진 1장, 빗살 tip을 모델 tip 높이 평면에 역투영). 실제 간격 Q3 17.4/17.4 mm, Q4 17.3/17.5 mm(같은 빗살). 모델 Q3 17.4 mm, **Q4 17.9 mm**. Q3는 모델과 빗살별 −1.9~+1.6 mm, Q4는 −8.3~+8.9 mm(반 칸) 어긋남. 예전 기록의 "Q4 모델 오차 1.3–2.2 cm"와 같은 방향. Q4 계획기 목표 핀이 최대 반 칸 틀릴 수 있다. 바구니 모델 값은 보스 확인 후 고친다(지금은 기록만). 한계: 카메라 자세를 Q3로 맞춰 Q4는 외삽이지만, 실측 간격이 Q3·Q4 모두 17.4 mm로 같아 카메라 배율 오차로는 설명이 안 된다.
 7. 측면 CNN 2차 (`run_side_v2`, v1 ep07 + 16,000장, 접시 걸친 장면 70 %, 8 epoch): sim 독립 600장 recall 0.994 / precision 0.987(사진 전체 정답 465/600, v1 373/600), 모든 장면에 접시 400장 0.991 / 0.983(276/400, v1 205/400). 실사진 Q3 52/52·오검출 0(v1과 같음). `slot_reader` 기본 모델을 v2 ep07로.
+### 2026-10-29 22:2x Codex — CT 도킹 RL 시작
+- `job_taught_1029_cal.npz`, 측면 카메라 `T_base_side.json`, `run_side_v2/ep07`/`slot_reader.py`를 읽고 입력 계약을 검토한 뒤 GPU 운동학 환경, 고정/P 기준선, PPO, 동일 seed 1024 평가 순으로 시작했다. 실로봇·카메라·ROS는 실행하지 않는다.
+- 선행 주의: `--calibrate_h`의 H는 실측 파지 자세가 아니라 티칭 슬롯 최종 자세로 역산한 값이라 실제 손 안 자세 GT가 아니다. Q3 모델 pitch는 실측과 일치하지만 Q4는 최대 반 pitch 차이가 있어 첫 정책·평가는 Q3에 한정하고 Q4 성능을 주장하지 않는다.
+
+### 2026-10-29 22:5x Codex — CT 운동학 환경·기준선·PPO 1차
+- `rl/dock_env.py`: 24개 Q3 taught flange 경로를 48 step으로 재표본화하고, 파지 H(행 ±15°, 평행이동 ±15 mm, tilt ±3°), 바구니 ±1 cm/±1°, pitch/lean을 GPU에서 병렬 무작위화한다. 측면 카메라 투영에는 tip σ2 px, miss 5%, false 3%를 넣었고 관측은 목표 띠 대비 접시 밑면 오차·기울기·남은 높이·직전 action이다. action은 step당 2 mm/2 mm/1° residual이며 z는 taught path를 따른다.
+- `rl/dock_train.py`: image-space P 기준선에 residual PPO(2×128 MLP)를 학습하고 fixed/P/PPO를 같은 seed 1024, 각 1024회로 비교했다. Wilson 95% CI: fixed **8.20% [6.67, 10.04]**, P **24.90% [22.35, 27.64]**, PPO **25.49% [22.91, 28.25]**. PPO의 별도 학습 seed 평가 최고는 29.79%였으나 동일 seed 차이는 CI가 겹쳐 개선 확정으로 해석하지 않는다.
+- 결과: `outputs/dock_rl_20261030/ppo_residual_v3/{comparison.json,comparison.tsv,learning_curve.png,best.pt,last.pt,train.jsonl}`. system Python의 numpy 누락과 Qt backend 문제를 각각 FoundationPose Python, Agg backend로 고쳐 smoke와 전체 학습을 통과했다. 다음은 `rl/hand_basket.py` 기반 동일 perturbation의 Isaac 물리 안착 검증이다. 실로봇·카메라·ROS는 실행하지 않았다.

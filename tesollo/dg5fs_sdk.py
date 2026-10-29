@@ -48,7 +48,7 @@ JOINTS = 20
 # plate: pose 0 -> arm to the plate -> pose 9 (grasp-ready) -> 5 finger parallel (as grasp recipe 2: spread joints held) 7 N;
 # bowl: pose 30 + grasp recipe 1 (5 finger to the centre), 7 N
 OBJECT_GRASP = {'plate': ('plate_pre9', '5F_5FINGER_PARALLEL', [1, 5, 9, 13, 17], 7.0),
-                'bowl': ('bowl_grasp30', '5F_5FINGER', [], 4.0)}   # (보스 10/29: bowl gently) 7 -> 4 N
+                'bowl': ('bowl_grasp30', '5F_5FINGER', [], 7.0)}
 
 
 def measure_basket():
@@ -482,9 +482,10 @@ def main():
     p.add_argument('--vel', type=float, default=60.0, help='arm speed deg/s (= deg/s^2) for every arm leg (default 60)')
     p.add_argument('--grasp_ms', type=int, default=3000, help='hand motion time of the closing [ms] (보스 10/29: slower, like '
                    'the release = 3000)')
-    p.add_argument('--preclose', type=float, default=0.7, help='(--object) the fingers close this fraction of the way to where '
+    p.add_argument('--preclose', type=float, help='(--object) the fingers close this fraction of the way to where '
                    'they stopped on the last grasp (tesollo/grasp_contact.json) in one slow move, the force grasp does the rest '
-                   '(보스 10/29: ready -> grasp as one motion); 0 = pre-pose, then grasp')
+                   '(보스 10/29: ready -> grasp as one motion; bowl slowly: its pre-pose is only ~9 deg from the contact, so '
+                   'the force grasp did all of it fast); default plate 0.7, bowl 0.95; 0 = pre-pose, then grasp')
     p.add_argument('--smooth_grasp', action='store_true', help='(--object, untested) the SDK smooth-grasping flag on')
     p.add_argument('--lift', type=float, default=0.30, help='straight up after the grasp, bowl or plate [m] (보스 10/29: 30 cm)')
     p.add_argument('--taught_wrist_less', type=float, default=25.0, help='(taught plate insert) the wrist this much less '
@@ -628,6 +629,8 @@ def main():
                     not arm_legs(a.object, ARM_APPROACH):
                 raise KeyboardInterrupt
         contact = json.loads(CONTACT.read_text()).get(a.object) if a.object and CONTACT.exists() else None
+        if a.preclose is None:
+            a.preclose = 0.7 if a.object == 'plate' else 0.95
         if a.object and AUTO[0] and a.preclose > 0:
             # (보스 10/29) ready + grasp as ONE motion: from where the hand is, the fingers go (slowly, --grasp_ms) toward
             # where they stopped on the last grasp of this object, and the force grasp starts just before that move ends

@@ -245,6 +245,8 @@ def detect_live(a):
     own rate, or the perception share.  Prompts / conf from the command line; fps and YOLOE ms in the terminal."""
     import sys
     det = Detector(a.prompts, zoom=a.zoom, imgsz=a.imgsz, half=a.half)
+    Tbc = np.asarray(json.loads(Path(a.T_base_cam).read_text())['T_base_cam'], float) if a.T_base_cam else None
+    Tb = load_basket(a.basket) if a.basket else None
     cam = None
     if a.camera:
         sys.path.insert(0, str(ROOT / 'real_time_project'))
@@ -261,7 +263,8 @@ def detect_live(a):
     try:
         while True:
             if cam is not None:
-                rgb = cam.read().rgb
+                fr = cam.read()
+                rgb, K = fr.rgb, np.asarray(fr.K, float)
             else:
                 try:
                     z = np.load(a.share)
@@ -270,18 +273,22 @@ def detect_live(a):
                             break
                         continue
                     last, rgb = float(z['t']), z['rgb']
+                    K = np.asarray(z['K'], float) if 'K' in z else None
                 except (OSError, ValueError, KeyError):
                     time.sleep(0.05)
                     continue
             t0 = time.perf_counter()
             dets = det(rgb, a.conf)
             ms = (time.perf_counter() - t0) * 1000
-            img = rgb.copy()
-            for name, c, _, mk in dets:                        # masks lightly filled so a missed bowl is obvious
-                if mk is not None:
-                    col = np.array(COLOURS.get(name, (255, 60, 200)), np.uint8)
-                    img[mk] = (0.6 * img[mk] + 0.4 * col).astype(np.uint8)
-            img = draw(img, dets, None, None, None, {}, None, show_conf=True)
+            if a.audience:
+                img = draw_audience(rgb, dets, K, Tbc, Tb)
+            else:
+                img = rgb.copy()
+                for name, c, _, mk in dets:                    # masks lightly filled so a missed bowl is obvious
+                    if mk is not None:
+                        col = np.array(COLOURS.get(name, (255, 60, 200)), np.uint8)
+                        img[mk] = (0.6 * img[mk] + 0.4 * col).astype(np.uint8)
+                img = draw(img, dets, None, None, None, {}, None, show_conf=True)
             n_frames += 1                                      # (10/26 보스) no changing numbers on the image: terminal, every 5 s
             if time.perf_counter() - t_prev > 5.0:
                 print(f'{n_frames / (time.perf_counter() - t_prev):.1f} fps, YOLOE {ms:.0f} ms, conf >= {a.conf}: '

@@ -417,3 +417,19 @@ def selftest():
 
 if __name__ == '__main__':
     selftest()
+
+
+def yoloe_set_classes(model, names):
+    """model.set_classes(names) with the text embeddings cached on disk (data/yoloe_text_pe/): computing them loads the
+    572 MB MobileCLIP text model, ~2-3 s per process (보스 10/29: the demo start is slow)."""
+    import hashlib
+    import torch
+    names = list(names)
+    f = Path(__file__).resolve().parent / 'data/yoloe_text_pe' / (hashlib.sha1('\n'.join(names).encode()).hexdigest()[:16] + '.pt')
+    try:
+        pe = torch.load(f)
+    except (OSError, RuntimeError, EOFError):
+        pe = model.get_text_pe(names)
+        f.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(pe.detach().cpu(), f)
+    model.set_classes(names, pe)

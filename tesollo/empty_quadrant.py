@@ -9,6 +9,7 @@ out of the view (home).  The camera must be free.
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -20,6 +21,8 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--basket', required=True, help='basket_vision.json (T)')
     p.add_argument('--frames', type=int, default=5)
+    p.add_argument('--wait', type=float, default=0.0, help='wait up to this many s for --basket to be written (the demo '
+                   'starts this while the basket is still being measured, 보스 10/29: slow start)')
     a = p.parse_args()
     sys.path.insert(0, str(ROOT / 'calibration'))
     sys.path.insert(0, str(ROOT / 'real_time_project'))
@@ -28,8 +31,19 @@ def main():
     import plate_plans as pp
     from fixed_frames import FixedFrames
     Tbc = np.array(cc.load_json(cc.latest_t_base_cam())['T_base_cam'])
-    Tb = np.array(json.loads(Path(a.basket).read_text())['T'])
-    det = dw.Detector()
+    det = dw.Detector()                                    # the model loads while the basket may still be measured
+    t_end = time.time() + a.wait
+    while True:
+        try:
+            res = json.loads(Path(a.basket).read_text())
+            break
+        except (OSError, ValueError):
+            if time.time() > t_end:
+                sys.exit(f'no basket file {a.basket}')
+            time.sleep(0.2)
+    if not res.get('ok'):
+        sys.exit(f'basket not measured: {res.get("why")}')
+    Tb = np.array(res['T'])
     cam = FixedFrames(pp.C['cameras']['fixed_serial'])
     votes, pins = [], {}
     try:

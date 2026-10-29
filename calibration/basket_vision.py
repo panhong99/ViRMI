@@ -33,7 +33,9 @@ class Detector:
     def __init__(self):
         from ultralytics import YOLOE
         self.m = YOLOE(str(ROOT / 'yoloe-v8l-seg.pt'))
-        self.m.set_classes(PROMPTS + CUT, self.m.get_text_pe(PROMPTS + CUT))
+        sys.path.insert(0, str(ROOT / 'calibration'))
+        import calib_core as cc
+        cc.yoloe_set_classes(self.m, PROMPTS + CUT)
 
     def masks(self, rgb, conf=0.05):             # (10/21: basket turned -12 deg at x 0.85 -> rack only 0.10; was 0.1)
         """(rack mask or None, plate mask union, rack confidence); self.plate_masks = [(mask, conf), ...] each plate."""
@@ -333,7 +335,8 @@ def estimate(det, rgb, depth, K, Tbc, z_rim, posj=None, M=None):
                 obstacles=obstacle_boxes(det, rack, depth, K, Tbc, posj))
 
 
-def live(share, Tbc, posj, z_rim, n=5, gap_s=0.6, timeout_s=40.0, max_spread_mm=6.0, max_spread_deg=1.5, stale_s=5.0):
+# (보스 10/29 slow start) gap 0.6 -> 0.2 s: the share has a new frame every ~0.06 s
+def live(share, Tbc, posj, z_rim, n=5, gap_s=0.2, timeout_s=40.0, max_spread_mm=6.0, max_spread_deg=1.5, stale_s=5.0):
     """n fresh frames of the fixed camera share -> median pose; refused if any frame is refused or they disagree."""
     det, M = Detector(), model_points()
     t0, last, res = time.time(), 0.0, []                           # frames newer than the loaded models only

@@ -13,6 +13,7 @@ Opt-in (pipeline --quadrant auto / --demo_view); nothing else reads it."""
 import argparse
 import json
 import os
+import sys
 import time
 import zipfile
 from pathlib import Path
@@ -46,11 +47,13 @@ class Detector:
         self.output_names = list(dict.fromkeys(NAME_ALIASES.get(p, p) for p in self.names))
         self.imgsz, self.half = int(imgsz), bool(half)
         self.m = YOLOE(str(ROOT / 'yoloe-v8l-seg.pt'))
-        self.m.set_classes(self.names, self.m.get_text_pe(self.names))
+        sys.path.insert(0, str(ROOT / 'calibration'))
+        import calib_core as cc
+        cc.yoloe_set_classes(self.m, self.names)
         self.bowl = None
         if 'bowl' in prompts:
             self.bowl = YOLOE(str(ROOT / 'yoloe-v8l-seg.pt'))
-            self.bowl.set_classes([BOWL_PROMPT, 'dish drying rack'], self.bowl.get_text_pe([BOWL_PROMPT, 'dish drying rack']))
+            cc.yoloe_set_classes(self.bowl, [BOWL_PROMPT, 'dish drying rack'])
 
     def _predict(self, model, names, rgb, conf):
         r = model.predict(rgb[:, :, ::-1].copy(), conf=conf, verbose=False, retina_masks=True,

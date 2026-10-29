@@ -51,15 +51,15 @@ OBJECT_GRASP = {'plate': ('plate_pre9', '5F_5FINGER_PARALLEL', [1, 5, 9, 13, 17]
                 'bowl': ('bowl_grasp30', '5F_5FINGER', [], 7.0)}
 
 
-def measure_basket():
+def measure_basket(proc=None):
     """(10/29 보스: no basket-position dependency) the basket pose from the fixed D455 without markers, arm at home and
-    out of the view (calibration/basket_vision.py --camera fixed); the file every basket plan of this run uses."""
+    out of the view (calibration/basket_vision.py --camera fixed); the file every basket plan of this run uses.
+    proc = start_basket() started earlier (보스 10/29: slow start - it runs alongside the quadrants and the object)."""
     import math
-    out_json = Path(BASKET_JSON[0] or Path('/tmp') / f'tesollo_basket_{time.strftime("%Y%m%d_%H%M%S")}.json')
-    share = Path('/dev/shm/fixed_latest.npz')               # (10/29) a viewer owns the camera: its shared frames
-    cam = 'share' if share.exists() and time.time() - share.stat().st_mtime < 2.0 else 'fixed'
-    r = subprocess.run([str(PLAN_PY), str(REPO / 'calibration/basket_vision.py'), '--camera', cam, '--out', str(out_json),
-                        '--cut', 'bowl', '--majority', '4'], capture_output=True, text=True)
+    out_json = Path(BASKET_JSON[0])
+    proc = proc or start_basket()
+    o, e_ = proc.communicate()
+    r = subprocess.CompletedProcess(proc.args, proc.returncode, o, e_)
     try:
         res = json.loads(out_json.read_text())
     except (OSError, ValueError):
@@ -70,6 +70,18 @@ def measure_basket():
     print(f'basket measured: x {T[0][3] * 1000:.0f} mm, y {T[1][3] * 1000:+.0f} mm, yaw '
           f'{math.degrees(math.atan2(T[1][0], T[0][0])):+.1f} deg (frames within {res["spread_mm"]:.1f} mm) -> {out_json}', flush=True)
     BASKET_JSON[0] = str(out_json)
+
+
+def start_basket():
+    """basket_vision.py in the background, writing BASKET_JSON (empty_quadrant.py --wait reads it when it appears)."""
+    if not BASKET_JSON[0]:
+        BASKET_JSON[0] = f'/tmp/tesollo_basket_{time.strftime("%Y%m%d_%H%M%S")}.json'
+    Path(BASKET_JSON[0]).unlink(missing_ok=True)
+    share = Path('/dev/shm/fixed_latest.npz')               # (10/29) a viewer owns the camera: its shared frames
+    cam = 'share' if share.exists() and time.time() - share.stat().st_mtime < 2.0 else 'fixed'
+    return subprocess.Popen([str(PLAN_PY), str(REPO / 'calibration/basket_vision.py'), '--camera', cam, '--out',
+                             BASKET_JSON[0], '--cut', 'bowl', '--majority', '4'], stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True)
 
 
 VIEW = [None]               # the spectator view this run started (calibration/demo_watch.py --audience --write_share)
@@ -162,10 +174,17 @@ def save_state(st):
     DEMO_STATE.write_text(json.dumps(st))
 
 
-def see_quadrants():
+def start_quadrants():
+    """empty_quadrant.py in the background; it waits for the basket file (measured alongside)."""
+    return subprocess.Popen([str(PLAN_PY), str(REPO / 'tesollo/empty_quadrant.py'), '--basket', BASKET_JSON[0],
+                             '--wait', '60'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+
+def see_quadrants(proc=None):
     """Bowls / plates already in the basket quadrants (fixed camera, arm home) -> SEEN."""
-    out = subprocess.run([str(PLAN_PY), str(REPO / 'tesollo/empty_quadrant.py'), '--basket', BASKET_JSON[0]],
-                         capture_output=True, text=True)
+    proc = proc or start_quadrants()
+    o, e_ = proc.communicate()
+    out = subprocess.CompletedProcess(proc.args, proc.returncode, o, e_)
     m = re.search(r'^RESULT (.+)$', out.stdout, re.M)
     if out.returncode or not m:
         print(f'   quadrants not seen (only the remembered ones count):\n{out.stderr[-400:]}', flush=True)
@@ -519,7 +538,7 @@ def main():
     MOVER_GO[:] = [] if a.leg_enter else MOVER_GO
     WRIST_LESS[0] = a.wrist_less
     SIM_CORR[0] = str(Path(a.sim_corr).resolve()) if a.sim_corr else ''
-    held = None
+    held = basket_proc = None
     if a.basket_json:
         BASKET_JSON[0] = str(Path(a.basket_json).resolve())
         if a.object and not a.no_view:                  # (보스 10/29 safe demo: fixed basket) the view all the same
@@ -531,15 +550,21 @@ def main():
         BASKET_JSON[0] = f'/tmp/tesollo_basket_{time.strftime("%Y%m%d_%H%M%S")}.json'
         if a.no_view or not start_view():
             pass
-        measure_basket()
+        basket_proc = start_basket()
     if a.new_demo:
         DEMO_STATE.unlink(missing_ok=True)
-    seen = None
-    if a.object == 'auto':                                       # perceive.py alongside empty_quadrant.py (both read the share)
+    # (보스 10/29: slow start) basket, quadrants and the object at the same time (all read the view's shared frames;
+    # the quadrants wait for the basket file); each loads its own YOLOE, so in a row they took ~20 s
+    seen = quad_proc = None
+    if a.object == 'auto':
         seen = subprocess.Popen([str(PLAN_PY), str(REPO / 'tesollo/perceive.py')], stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, text=True)
     if a.object and BASKET_JSON[0]:
-        see_quadrants()                                          # arm home, the basket in view
+        quad_proc = start_quadrants()
+    if basket_proc is not None:
+        measure_basket(basket_proc)
+    if quad_proc is not None:
+        see_quadrants(quad_proc)                                 # arm home, the basket in view
         st = load_state()
         print(f'remembered in the basket today: bowls {st["bowls"]}, plates {[(p_["q"], p_["pin"]) for p_ in st["plates"]]}'
               ' (--new_demo clears)', flush=True)

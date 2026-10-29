@@ -64,7 +64,7 @@ def measure(n=5, conf=0.25, only=None, png=None, max_spread_mm=8.0, radius=0.30)
     from ultralytics import YOLOE
     Tbc = np.array(cc.load_json(cc.latest_t_base_cam())['T_base_cam'])
     model = YOLOE(str(ROOT / 'yoloe-v8l-seg.pt'))
-    model.set_classes(list(PROMPTS), model.get_text_pe(list(PROMPTS)))
+    cc.yoloe_set_classes(model, list(PROMPTS))
     A = yaml.safe_load(ARM_POSES.read_text())
     cam = FixedFrames(pp.C['cameras']['fixed_serial'])
     found = []

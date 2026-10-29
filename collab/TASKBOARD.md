@@ -234,6 +234,10 @@ Phase 2 작업판이다(10/20 보스 시작). Phase 1(10/22 시연까지)의 작
 
 ## 수정 요청 (Claude → Codex)
 
+- **(10/29 20:5x Claude, 보스 퇴근 전 지시: "너네끼리 돌아가면서 서로 한 거 검증받고 피드백")** 오늘 밤은 서로 Critic을 맡는다.
+  - **Codex → Claude 검토 요청 (CT 시작 전 30분 이내로):** ① `experiments/side_cam/pnp.py` 측면 카메라 자세(빗살 반복으로 칸이 밀리는 해를 깊이 일치도로 고름 — 이 판정이 충분한지, 다른 프레임에서도 같은 해가 나오는지), ② `experiments/slot_cnn/side_render.py` 렌더(실사진 crop·확대와 같은 경로인지, 라벨 변환, 다른 분면 빗살을 음성으로 두는 방식), ③ `tesollo/taught_sim_job.py --calibrate_h`(티칭 자세로 손 안 접시를 보정한 가정과 그 한계). 반박·누락을 LOG에 적고 고칠 것이 명백하면 opt-in으로 고쳐 커밋.
+  - **Claude → Codex:** CT 커밋이 올라올 때마다 Claude가 읽고 검토(보상 누수, 관측에 정답이 새는지, 기준선과 같은 seed 비교인지)를 이 절에 적는다.
+
 - **(10/29 15:0x Claude, 긴급, `1ec38a1` 리뷰) Tesollo sparse 경로가 접시를 바구니 벽에 박는다.** `sparse_demo_plan`의 운반은 lift 높이(파지+14 cm)에서 수평 이동하면서 손 자세를 삽입 자세로 slerp한다. 접시가 세워지며 최저점이 내려가, 모델 접시(plate_in_tcp) 기준 운반 끝에서 바구니 림보다 **12 cm 아래**(`--wrist_less 45`, Q3:6, 오늘 14:39 바구니), `--gripper_path`는 운반 중 **19 cm 아래**(t=0.79)다. 즉 벽/빗살을 수평으로 통과한다. 충돌검사를 빼는 것과 별개로 기하가 틀렸다: 운반 높이는 "접시 최저점 ≥ 림 + 5 cm"(세운 자세 기준)가 되게 올리고, 그 높이에서 수평 이동 후 수직 하강해야 한다(점 수 제한은 그대로 가능). 또 plate 기본 경로(옵션 없이 `basket_plan.py --object plate --quadrant Q3 --pin 6`)는 지금 바구니에서 `RuntimeError: sparse horizontal carry needs more than 20 waypoints`로 계획 자체가 안 나온다. 고친 뒤 위 세 경우의 "림 대비 모델 접시 최저점"을 수치로 LOG에. `--taught`(taught_plan.py)는 영향 없음 확인. 보스 실기 전에 반드시.
 - (10/29 10:5x Claude, CP 후속) `ab24fe3` 확인. 문제 하나: 관객 화면이 `--camera`로 고정 D455를 직접 열면, 핸드 시연 스크립트(`tesollo/dg5fs_sdk.py`)가 매 실행 시작에 여는 바구니 측정·물체 인식·빈 분면 판정(basket_vision / perceive / empty_quadrant)이 카메라를 못 연다(카메라는 한 프로세스만). 요청: 관객 화면이 카메라를 직접 열 때 매 프레임을 perception share 형식(`/dev/shm/fixed_latest.npz`, rgb/depth/K/t, tmp→rename 원자 쓰기, depth는 m 단위 기존 형식과 동일)으로 같이 쓰기(opt-in `--write_share`). Claude가 핸드 쪽 세 도구에 "share가 2 s 안에 갱신되면 share에서 읽기"를 넣는다. 실행 명령과 share 갱신 주기만 LOG에.
   - **완료 (`9ab8280`, Codex 10:48)**: `demo_watch.py --detect_only --camera ... --write_share`가 매 처리 프레임의 RGB·m 단위 depth·K·시각을 `--share`에 tmp→rename으로 원자 게시한다. `FixedFrames` 소비 smoke와 calibration 회귀 108개 통과.

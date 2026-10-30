@@ -22,6 +22,7 @@ import side_render as SR  # noqa: E402
 
 CKPT = 'calibration/data/slot_cnn/run_side_v2/ep07.pt'   # 10/29 night: sim 0.994 / 0.987 (v1 0.988 / 0.973)
 N_TINES = 13
+REF = ROOT / 'calibration/data/side_cam/tine_ref.json'   # (10/30) numbered tips of the empty basket, median of clear frames
 
 
 def read(bgr, quadrant, net=None):
@@ -54,6 +55,71 @@ def read(bgr, quadrant, net=None):
         rows.append(None)
         why.append('row missing')
     return dict(rows=rows, crop=(x0, y0, w, h), why='; '.join(why))
+
+
+def make_ref(frames, net=None, quadrants=('Q3', 'Q4')):
+    """(10/30) median numbered tips over the frames where read() numbers both rows (basket and camera fixed) ->
+    {q: [[13 x 2], [13 x 2]]} and the p95 jitter in px."""
+    net = net or SE.load(CKPT)
+    rows, out = {q: [] for q in quadrants}, {}
+    for f in frames:
+        bgr = cv2.imread(str(f))
+        for q in quadrants:
+            r = read(bgr, q, net)
+            if all(x is not None for x in r['rows']):
+                rows[q].append(np.array(r['rows']))
+    for q in quadrants:
+        R = np.array(rows[q])
+        med = np.median(R, 0)
+        out[q] = dict(rows=med.round(2).tolist(), frames=len(R),
+                      jitter_p95_px=float(np.percentile(np.abs(R - med).max((1, 2, 3)), 95)))
+    return out
+
+
+def read_anchored(bgr, quadrant, ref, net=None, tol=6.0, search=10):
+    """(10/30, 보스: numbers stay when a plate hides tines) the reference rows shifted (<= search px, 1 px grid) onto the
+    CNN tips this frame; a row needs >= 4 matched tips within tol px, else it keeps the reference unshifted.
+    -> read()-style dict + visible (2, 13) bool and shift per row; CNN points off every reference tip are dropped."""
+    net = net or SE.load(CKPT)
+    parts, B = D.basket_parts(False)
+    x0, y0, w, h = SR.crop_box(D.tine_table(parts, B), quadrant, np.linalg.inv(SR.side_pose()))
+    z = cv2.resize(bgr[y0:y0 + h, x0:x0 + w], (D.W, D.H), interpolation=cv2.INTER_CUBIC)
+    p = E.predict(net, z, 0.3)['tip']
+    P = np.c_[p[:, 0] * w / D.W + x0, p[:, 1] * h / D.H + y0] if len(p) else np.zeros((0, 2))
+    g = np.arange(-search, search + 1, 1.0)
+    S = np.stack(np.meshgrid(g, g), -1).reshape(-1, 2)
+    rows, vis, shifts, why = [], [], [], []
+    for R in np.array(ref[quadrant]['rows']):
+        best = (0, np.zeros(2))
+        if len(P):
+            d = np.linalg.norm((R[None, :, None] + S[:, None, None]) - P[None, None], axis=3).min(2)   # (shifts, 13)
+            score = (d < tol).sum(1) - 1e-3 * np.where(d < tol, d, 0).sum(1)
+            k = int(np.argmax(score))
+            if (d[k] < tol).sum() >= 4:
+                best = ((d[k] < tol).sum(), S[k])
+        Rs = R + best[1]
+        v = np.linalg.norm(Rs[:, None] - P[None], axis=2).min(1) < tol if len(P) else np.zeros(len(R), bool)
+        if best[0] < 4:
+            why.append(f'row with {int(v.sum())} tips matched (reference kept)')
+        rows.append(Rs); vis.append(v); shifts.append(best[1].tolist())
+    return dict(rows=rows, visible=np.array(vis), shift=shifts, crop=(x0, y0, w, h), why='; '.join(why), points=P)
+
+
+def plate_bottom(bgr, bg, crop, thr=40, min_px=400):
+    """(10/30) lowest image point of what entered the crop since the background frame bg (taken before the descent):
+    the largest changed blob's bottom row (mean u of its last 3 rows).  None when nothing entered."""
+    x0, y0, w, h = crop
+    m = (np.abs(bgr[y0:y0 + h, x0:x0 + w].astype(np.int16) - bg[y0:y0 + h, x0:x0 + w].astype(np.int16)).max(2) > thr)
+    m = cv2.morphologyEx(m.astype(np.uint8), cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
+    n, lab, st, _ = cv2.connectedComponentsWithStats(m)
+    if n < 2:
+        return None
+    k = 1 + int(np.argmax(st[1:, cv2.CC_STAT_AREA]))
+    if st[k, cv2.CC_STAT_AREA] < min_px:
+        return None
+    vv, uu = np.nonzero(lab == k)
+    low = vv >= vv.max() - 2
+    return np.array([uu[low].mean() + x0, vv.max() + y0], float)
 
 
 def band(r, pin):

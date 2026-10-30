@@ -54,14 +54,14 @@ def main():
         rec.mkdir(parents=True, exist_ok=True)
         print('recording raw frames to', rec, flush=True)
     cv2.namedWindow('side CNN', cv2.WINDOW_NORMAL)
-    i = 0
+    n_frame = 0
     try:
         while True:
             t0 = time.time()
             bgr = still if still is not None else np.asanyarray(pipe.wait_for_frames().get_color_frame().get_data())
-            if rec is not None and i % a.record == 0:
-                cv2.imwrite(str(rec / f'{i:06d}.jpg'), bgr, [cv2.IMWRITE_JPEG_QUALITY, 95])
-            i += 1
+            if rec is not None and n_frame % a.record == 0:
+                cv2.imwrite(str(rec / f"{n_frame:06d}.jpg"), bgr, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            n_frame += 1
             full, tiles, status = bgr.copy(), [], []
             for q in ('Q3', 'Q4'):
                 r = S.read(bgr, q, net)

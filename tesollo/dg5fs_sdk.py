@@ -804,11 +804,13 @@ def main():
             pass
         if a.lock:
             # (보스 10/30 real: --lock let the plate go) the position gains are soft (P 3): a target AT the measured angles
-            # squeezes with ~0.  Target = the measured angles + --lock_squeeze deg further in the closing direction (from
-            # the pre-pose to where the grasp stopped) on the joints that closed > 2 deg; held joints stay
+            # squeezes with ~0.  Target = the measured angles + --lock_squeeze deg further in the closing direction on the
+            # joints that closed > 2 deg; held joints stay.  Closing = from the open hand (all 0) to where the grasp stopped
+            # (10/30 real: from the pre-pose it pointed the wrong way - the plate stops the fingers short of it - and the
+            # fingers opened 3-5 deg)
             now = [float(v) for v in g.get_gripper_data().joint[:JOINTS]]
-            tgt = [v + (a.lock_squeeze * (1 if v > p_ else -1) if not hold[j] and abs(v - p_) > 2.0 else 0.0)
-                   for j, (v, p_) in enumerate(zip(now, pre))]
+            tgt = [v + (a.lock_squeeze * (1 if v > 0 else -1) if not hold[j] and abs(v) > 2.0 else 0.0)
+                   for j, v in enumerate(now)]
             ask(f'2b. lock: position mode, the closing joints {a.lock_squeeze:g} deg past where they stopped '
                 f'({[j + 1 for j in range(JOINTS) if tgt[j] != now[j]]}).')
             check('hold target', g.move_joint_all(tgt))

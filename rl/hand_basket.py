@@ -51,6 +51,8 @@ def parse():
     p.add_argument('--out', default='')
     p.add_argument('--seed', type=int, default=0)
     p.add_argument('--viewer', action='store_true')
+    p.add_argument('--viewer_hold', action='store_true', help='(opt-in, 보스 10/30 GUI) --viewer: keep the window open '
+                   'on the settled plates after the results are saved, until it is closed')
     p.add_argument('--hand', action='store_true', help='opt-in M1013 + DG-5F-S collision replay (job must contain arm_q)')
     p.add_argument('--hand_contact_n', type=float, default=1.0, help='hand-basket contact threshold [N]')
     p.add_argument('--dock_traj', default='', help='eval: dock_train.py exported residual trajectory bundle')
@@ -405,6 +407,9 @@ def main():
         Path(a.out).parent.mkdir(parents=True, exist_ok=True)
         Path(a.out).write_text(json.dumps(out, indent=1))
         print(f'saved {a.out}', flush=True)
+    if a.viewer and a.viewer_hold:
+        while app.is_running():
+            app.update()
     import os
     os._exit(0)                                                  # (10/27) app.close() hung after the results were saved
 

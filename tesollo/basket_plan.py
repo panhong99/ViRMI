@@ -40,7 +40,7 @@ PLATE_SHIFT_M = tuple(float(v) for v in __import__('os').environ.get('PLATE_SHIF
 # that about this grasp tool-frame axis (the axis of the 96 deg turn); 0 = flat (the old rule) until it is measured.
 HANG_AXIS = (-0.94, 0.35, 0.01)
 BOWL_HEIGHT_M = 0.07        # perceive gives the bowl rim top (10/27 ref 0.072 m on the table): bottom = top - this
-BOWL_DROP_M = -0.07         # bowl bottom vs the basket rim when it is let go (보스 10/27 real Q3: +3 cm stopped 10 cm too high)
+BOWL_DROP_M = -0.09         # bowl bottom vs the basket rim when it is let go (보스 10/27 real Q3: +3 cm stopped 10 cm too high; 10/30: 2 cm lower)
 BOWL_SHIFT_M = (0.0, 0.10)  # + this (base xy) on the quadrant middle (보스 10/27 real Q3: 10 cm more toward robot +y)
 # (10/29) PLATE_SHIFT_M / BOWL_SHIFT_M were the stale fixed basket file, not the hand: measured live 10/29 the basket sat
 # (-37, +109) mm, 0.9 deg from demo_basket_fixed.json - the +y the real runs needed.  They apply only with that file;
@@ -68,16 +68,62 @@ def shifted_grasp(k, grasp, dx, dy):
     return np.degrees(q)
 
 
-def lift_line(k, q0, dz, n=11):
-    """Straight up from the FK of q0 (as arm_plan.py)."""
-    T0, out, q = k.fk(np.radians(q0)), [np.asarray(q0, float)], np.radians(q0)
-    for s in np.linspace(0, 1, n)[1:]:
+def wrist_near(k, q, prev):
+    """(보스 10/30: J4 spun ~170 deg on the bowl lift) the same flange pose by the other wrist branch (J4 + 180, -J5,
+    J6 - 180, +-360 on J4 / J6) when it is closer to prev: the lift crosses J5 = 0 and the IK took the flipped one. rad."""
+    lo, hi = np.array([j[3] for j in k.joints]), np.array([j[4] for j in k.joints])
+    best = np.asarray(q, float)
+    for s4 in (np.pi, -np.pi):
+        for s6 in (np.pi, -np.pi, 3 * np.pi, -3 * np.pi):
+            c = np.asarray(q, float).copy()
+            c[3], c[4], c[5] = q[3] + s4, -q[4], q[5] + s6
+            if ((c >= lo) & (c <= hi)).all() and np.abs(c - prev).max() < np.abs(best - prev).max():
+                best = c
+    return best
+
+
+LIFT_NEAR = [True]          # (10/30) lift_line on the nearest wrist branch; False = the IK's own knots (before 10/30)
+
+
+def lift_line(k, q0, dz, n=11, j5_min=8.0):
+    """Straight up from the FK of q0 (as arm_plan.py).  (보스 10/30: J4 spun on the bowl lift) the bowl lift passes the
+    wrist singularity (J5 ~ 0): there exact IK knots turn J4 / J6 against each other by up to 170 deg.  Knots solved
+    every cm on the wrist branch nearest the last knot with |J5| >= j5_min; knots with |J5| < j5_min are replaced by the
+    joint line between their good neighbours (the bowl leaves the vertical by a few mm there, the hand keeps its turn)."""
+    T0, q = k.fk(np.radians(q0)), np.radians(q0)
+    if not LIFT_NEAR[0]:
+        out = [np.asarray(q0, float)]
+        for s in np.linspace(0, 1, n)[1:]:
+            T = T0.copy()
+            T[2, 3] += s * dz
+            q = k.ik(T, q)
+            out.append(np.degrees(q))
+        return out
+    m = max(int(np.ceil(abs(dz) / 0.01)), n - 1)
+    ss = np.linspace(0, 1, m + 1)
+    dense, good, ref = [q], [True], q
+    for s in ss[1:]:
         T = T0.copy()
         T[2, 3] += s * dz
         q = k.ik(T, q)
         assert q is not None, 'IK failed on the lift'
-        out.append(np.degrees(q))
-    return out
+        c = wrist_near(k, q, ref)
+        if c is not q:                                   # refine on that branch (the flip is exact only to ~0.1 mm)
+            q = k.ik(T, c)
+        ok = abs(np.degrees(q[4])) >= j5_min
+        if ok:
+            ref = q
+        dense.append(q)
+        good.append(ok)
+    good[-1] = True
+    gi = [i for i, g in enumerate(good) if g]
+    for i in range(len(dense)):
+        if not good[i]:
+            a_ = max(g for g in gi if g < i)
+            b_ = min(g for g in gi if g > i)
+            dense[i] = dense[a_] + (i - a_) / (b_ - a_) * (dense[b_] - dense[a_])
+    D = np.degrees(np.array(dense))
+    return [np.array([np.interp(s, ss, D[:, j]) for j in range(6)]) for s in np.linspace(0, 1, n)]
 
 
 def hand_plate(k, grasp_deg, centre, tool):
@@ -301,12 +347,16 @@ def bowl_plan(a, k, Tbb, Tbc):
         # Cartesian knot every 10 cm, the carry / descent joint lines cut into even steps (the controller spline gives
         # every knot the same time: even steps = even speed; the descent's shorter steps slow it into the basket)
         lift_s = lift_line(k, grasp, a.rise, n=int(round(a.rise / 0.10)) + 1)
+        while np.abs(np.diff(np.array(lift_s), axis=0)).max() > 9.5 and len(lift_s) < 9:   # (10/30) even steps, see n_c
+            lift_s = lift_line(k, grasp, a.rise, n=len(lift_s) + 1)
         n_d = 3                                            # (보스 10/29: bowl lift 50 cm) the carry steps grow to stay <= 20 knots
-        n_c = min(int(np.ceil(np.abs(above - lift_s[-1]).max() / 14.0)), 20 - len(lift_s) - n_d)
+        # (보스 10/30: bowl and plate at one speed) carry steps ~ the lift's (9.5 deg; was 14): the spline time follows the
+        # largest step, so one big carry step slowed the whole bowl move (plate carry_insert 43 cm/s, bowl was 22-38)
+        n_c = min(int(np.ceil(np.abs(above - lift_s[-1]).max() / 9.5)), 20 - len(lift_s) - n_d)
         carry_s = [lift_s[-1] + s_ * (above - lift_s[-1]) for s_ in np.linspace(0, 1, n_c + 1)[1:]]
         down_s = [above + s_ * (np.array(down[-1]) - above) for s_ in np.linspace(0, 1, n_d + 1)[1:]]
         legs['carry_down'] = list(lift_s) + carry_s + down_s
-        n_h = int(np.ceil(np.abs(home - above).max() / 22.0))
+        n_h = int(np.ceil(np.abs(home - above).max() / max(1.0, np.abs(np.array(down[-1]) - above).max() / n_d)))   # (10/30) steps as the rise's
         legs['up_home'] = [down[-1]] + [down[-1] + s_ * (above - np.array(down[-1])) for s_ in np.linspace(0, 1, n_d + 1)[1:]] \
             + [above + s_ * (home - above) for s_ in np.linspace(0, 1, n_h + 1)[1:]]
         assert len(legs['carry_down']) <= 20, f'carry_down {len(legs["carry_down"])} knots'
@@ -436,8 +486,14 @@ def main():
         a.rise = BOWL_RISE_M
     if a.object == 'bowl':
         k = pp.Kinematics()
-        path = bowl_plan(a, k, np.array(json.loads(Path(a.basket).read_text())['T']),
-                         np.array(cc.load_json(cc.latest_t_base_cam())['T_base_cam']))
+        args_ = (a, k, np.array(json.loads(Path(a.basket).read_text())['T']),
+                 np.array(cc.load_json(cc.latest_t_base_cam())['T_base_cam']))
+        try:
+            path = bowl_plan(*args_)
+        except AssertionError as e:                   # (10/30) the other wrist branch can fail a check the old one met
+            print(f'bowl plan on the nearest wrist branch failed ({e}); the IK\'s own lift knots (J4 may turn)', flush=True)
+            LIFT_NEAR[0] = False
+            path = bowl_plan(*args_)
         plan = json.loads(Path(path).read_text())
         print('OK: bowl')
         for leg, v in plan['legs'].items():

@@ -72,7 +72,8 @@ def evaluate(net, env_kw, fit_ok, episodes=1024, seed=1024):
     ok = info['success']
     pc_ok = ok & (info['fit'] >= fit_ok)
     lo, hi = wilson(int(pc_ok.sum()), episodes)
-    return dict(success=float(ok.float().mean()), pc_success=float(pc_ok.float().mean()), pc_lo95=lo, pc_hi95=hi,
+    extra = dict(phys_pred=float(info['phys_p'].mean())) if 'phys_p' in info else {}
+    return dict(**extra, success=float(ok.float().mean()), pc_success=float(pc_ok.float().mean()), pc_lo95=lo, pc_hi95=hi,
                 fit=float(info['fit'].mean()), chamfer_mm=float(info['chamfer'].median() * 1000))
 
 
@@ -92,6 +93,11 @@ def snapshot(net, env_kw, path, envs=4, seed=7):
         ax.set_xlim(m[0] - 160, m[0] + 160); ax.set_ylim(m[1] - 160, m[1] + 160); ax.set_zlim(m[2] - 160, m[2] + 160)
         ax.set_title(f'{"OK" if ok[i] else "fail"} fit {f["fit"][i]:.2f} Chamfer {f["cham"][i]:.1f} mm', fontsize=9)
     fig.tight_layout(); fig.savefig(path, dpi=90); plt.close(fig)
+
+
+def kin_features(env):
+    """DockEnv.kin_features (x relative to the gap root, not the shifted goal)."""
+    return env.kin_features()
 
 
 @torch.no_grad()
@@ -115,6 +121,7 @@ def export_physics(net, env_kw, prefix, episodes=1024, seed=51024):
             res[ids, env.t] = r
         path = prefix.with_name(prefix.name + f'_{method}.npz')
         np.savez_compressed(path, method=method, seed=seed, job=env.job.cpu().numpy(), H=env.H.cpu().numpy(),
+                            kin_feat=kin_features(env).cpu().numpy(),
                             residual=res.cpu().numpy(), zdown=env.zdown.cpu().numpy(),
                             kin_success=info['success'].cpu().numpy(), kin_fit=info['fit'].cpu().numpy(),
                             names=np.array([f'Q3_job_{i}' for i in range(len(env.paths))]), env_kwargs=json.dumps(kw))
@@ -144,6 +151,8 @@ def main():
     p.add_argument('--residual_pitch_deg', type=float, default=25.0)
     p.add_argument('--hover_until', type=float, default=0.15)
     p.add_argument('--target_x_mm', type=float, default=0.0, help='goal/seat x offset from the gap root (basket x)')
+    p.add_argument('--phys_critic', default='', help='(opt-in) rl/phys_critic.py model: terminal reward += phys_w * P(physics)')
+    p.add_argument('--phys_w', type=float, default=12.0)
     p.add_argument('--plateau', type=int, default=0, help='also move on after this many updates without a new best (0: never)')
     p.add_argument('--epochs', type=int, default=3); p.add_argument('--batch', type=int, default=8192)
     p.add_argument('--lr', type=float, default=3e-4); p.add_argument('--gamma', type=float, default=.99)
@@ -163,7 +172,7 @@ def main():
     kw = dict(pc_goal=True, pc_tol_mm=a.tols[stage], pc_yaw=a.yaw, yaw_deg=a.yaw_deg if a.yaw else 0.0,
               descend_extra_mm=a.descend_extra_mm, residual_pitch_deg=a.residual_pitch_deg,
               hover_until=a.hover_until if a.hover_until > 0 else None, pc_disc_dist=a.disc_dist,
-              target_x_mm=a.target_x_mm)
+              target_x_mm=a.target_x_mm, phys_critic=a.phys_critic or None, phys_w=a.phys_w)
     env = DockEnv(a.envs, seed=a.seed, **kw)
     net = PointNetAC(env.pc_m, env.act_dim).cuda()
     if a.init:

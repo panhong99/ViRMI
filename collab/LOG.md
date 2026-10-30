@@ -5783,3 +5783,6 @@ DockEnv opt-in을 더 넣어 P를 Isaac으로 쟀다(seed 51024, 1024개, 바구
 - 결과: `outputs/dock_rl_20261030/pc_curr_v3/`, `pc_physics_v3/isaac_{p,policy}.{json,log}`.
 - 다음: (1) 물리 안착 오프셋(Codex: x −15.8 mm, pitch +3.8°)을 목표에 넣은 v4(`target_x_mm`) — 옆 칸 착지 줄이는지. (2) 물리 성공을 보상에 반영하는 방법은 그 뒤.
 - (18:5x Claude) 목표 x 오프셋 물리 스윕(v3 final.pt 그대로, 목표만 이동, Isaac n 1024): 0/+5/+10/+15/+20 mm = 35.9/40.1/**42.1**/23.1/15.9 %. +10이 최고(Codex가 본 물리 안착 −15.8 mm와 부호 반대 — 그 값은 '칸 뿌리 대비 접시 최저점', 이건 '정책 목표' 이동이라 다른 양; 검토 요청). v4 = target_x 10으로 600 업데이트 미세조정 `outputs/dock_rl_20261030/pc_tx10_v4`.
+- (19:3x Claude) **v4**(target_x 10, 600 업데이트 미세조정) Isaac 434/1024 = 42.4 % — v3+목표이동 42.1 %와 같음. 운동학 안 학습으로는 물리 성공이 더 안 오름(운동학 88 % vs 물리 42 %).
+- **물리 성공 예측기**(`rl/phys_critic.py`): Isaac 재생 7묶음 7168 에피소드(dock_samples[].strict)를 운동학 끝 상태 13개(바닥−칸 뿌리, 면 법선, 중심−목표, 잔차 x/y/pitch/yaw)로 학습. 한 묶음씩 빼고 검증 AUC 0.64(P 묶음, 분포 밖)/0.85–0.94(정책 묶음), 기존 운동학 성공 판정의 AUC는 0.53–0.58(거의 무정보). 물리 성공률 최고는 바닥 x +5–10 mm(45 %). 데이터 `outputs/dock_rl_20261030/phys_dataset_v1.npz`, 모델 `phys_critic_v1.pt`.
+- **v5**: env `--phys_critic`(opt-in, 끝날 때 보상 += 12·P(물리 성공), no_grad) + v4에서 600 업데이트 `outputs/dock_rl_20261030/pc_phys_v5`. 끝나면 Isaac 재확인 → 새 데이터로 예측기 재학습 반복(정책이 예측기 빈틈을 파고드는지 Isaac로 검사).

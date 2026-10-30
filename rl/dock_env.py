@@ -51,7 +51,8 @@ class DockEnv:
                  basket_yaw_deg=1.0, pitch_frac=0.05, lean_deg=3.0, descend_extra_mm=0.0,
                  residual_xy_mm=80.0, residual_pitch_deg=15.0, hover_until=None, hover_max=120, hover_step_mm=2.0,
                  hover_tilt_deg=None, target_x_mm=0.0, lean_follow=0.0,
-                 depth_obs=False, freeze_in_tines=False, pc_goal=False, pc_points=32, pc_tol_mm=5.0, pc_yaw=False, yaw_deg=0.0, pc_disc_dist=False):
+                 depth_obs=False, freeze_in_tines=False, pc_goal=False, pc_points=32, pc_tol_mm=5.0, pc_yaw=False, yaw_deg=0.0, pc_disc_dist=False,
+                 phys_critic=None, phys_w=12.0):
         self.device = torch.device(device)
         self.n, self.path_steps, self.hover_steps = int(num_envs), int(steps), int(hover_steps)
         # (Claude 10/29 3rd review, opt-in) after the taught end keep going down 2 mm a step until floor contact,
@@ -77,6 +78,14 @@ class DockEnv:
         if self.pc_goal:
             self.obs_dim = 9 + 6 * self.pc_m
         self.pc_disc_dist = bool(pc_disc_dist)
+        # (Claude 10/30, opt-in) a learned physics-success model (rl/phys_critic.py, trained on Isaac replays) scores
+        # each episode's kinematic end state; terminal reward += phys_w * P(physics success)
+        self.phys_critic, self.phys_w = None, float(phys_w)
+        if phys_critic:
+            from phys_critic import PhysCritic
+            self.phys_critic = PhysCritic().to(self.device)
+            self.phys_critic.load_state_dict(torch.load(phys_critic, map_location=self.device, weights_only=True))
+            self.phys_critic.eval().requires_grad_(False)
         self.pc_tol = float(pc_tol_mm) / 1000                  # fit-ratio radius (curriculum: wide first, then tighter)
         # (opt-in) in-hand yaw about the basket vertical (real grasps: 14-26 deg) and a 4th action that turns it back
         self.yaw_deg = float(yaw_deg)
@@ -314,6 +323,24 @@ class DockEnv:
         goal = centre[:, None] + L[None, :, 0:1] * u[:, None] + L[None, :, 1:2] * v[:, None]
         return cur, goal
 
+    @torch.no_grad()
+    def kin_features(self):
+        """The kinematic end state (N,13) for the physics-success model: plate bottom - gap root on the floor (basket
+        x/y/z, m), face normal (basket frame, x>0), plate centre - goal centre with the goal at the gap root (m),
+        residual x/y/pitch/yaw (yaw incl. the in-hand yaw)."""
+        P, bottom, normal, bottom_b, root_x, yc, _ = self._geometry()
+        R = self.Tbb[:, :3, :3].transpose(1, 2)
+        n_b = (R @ normal[..., None]).squeeze(-1)
+        n_b = n_b * torch.sign(n_b[:, :1])
+        cur, goal = self._clouds(P, root_x, yc)
+        seat = torch.stack((root_x - self.target_x, yc, torch.full_like(yc, self.floor_z)), 1)
+        dc = cur.mean(1) - goal.mean(1)
+        dc[:, 0] += self.target_x
+        res = torch.zeros(self.n, 4, device=self.device)
+        res[:, :3] = self.residual[:, :3]
+        res[:, 3] = self.yaw0 + (self.residual[:, 3] if self.act_dim > 3 else 0)
+        return torch.cat((bottom_b - seat, n_b, dc, res), 1)
+
     def pc_fit(self):
         """-> (fit ratio: plate points within pc_tol of the goal, mean distance [m]).  With pc_disc_dist the distance is
         each plate point to the goal DISC (plane offset + radial overshoot): exact, and blind to the spin about the
@@ -385,10 +412,16 @@ class DockEnv:
         self.terminated |= newly_done
         reward *= active.float()
         reward += newly_done.float() * (success.float() * 12.0 - (~success).float() * 6.0)
+        if self.phys_critic is not None:
+            with torch.no_grad():
+                self.phys_p = self.phys_critic(self.kin_features())
+            reward += newly_done.float() * self.phys_w * self.phys_p
         self.last_info = dict(success=self.terminal_success, along=e, across=ey,
                               angle_ok=angle_ok, height_ok=height_ok)
         if self.pc_goal:
             self.last_info.update(fit=fit, chamfer=cham)
+        if self.phys_critic is not None:
+            self.last_info.update(phys_p=self.phys_p)
         return obs, reward, self.terminated, self.last_info
 
     def _holding(self):

@@ -176,6 +176,11 @@ def export_physics_trajectories(net, prefix, episodes=1024, seed=51024):
             action=net.deterministic(obs) if method=='ppo' else controller(obs,'p')
             obs,_,_,_=env.step(action)
             residual[torch.arange(episodes,device='cuda'),env.t]=env.residual
+        # (Claude 10/30 fix) episodes end at floor contact before the last knots: hold the last correction there
+        # (zeros turned the plate back during the replayed descent)
+        last=residual[torch.arange(episodes,device='cuda'),env.t].clone()
+        after=torch.arange(env.path_steps,device='cuda')[None]>env.t[:,None]
+        residual=torch.where(after[...,None],last[:,None],residual)
         path=prefix.with_name(prefix.name+f'_{method}.npz')
         np.savez_compressed(path,method=method,seed=seed,job=env.job.cpu().numpy(),
                             H=env.H.cpu().numpy(),residual=residual.cpu().numpy(),

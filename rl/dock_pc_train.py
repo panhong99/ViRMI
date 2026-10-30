@@ -117,7 +117,7 @@ def export_physics(net, env_kw, prefix, episodes=1024, seed=51024):
             obs, _, _, info = env.step(net.deterministic(obs) if method == 'policy' else controller(obs, 'p'))
             r = torch.zeros(episodes, 4, device='cuda')
             r[:, :3] = env.residual[:, :3]
-            r[:, 3] = env.yaw0 + (env.residual[:, 3] if env.act_dim > 3 else 0)
+            r[:, 3] = env.yaw0 + (env.residual[:, 3] if env.res_dim > 3 else 0)
             if env.lean_follow:                              # the slot-face descent shift DockEnv adds inside _plate_pose_at
                 lf, env.lean_follow = env.lean_follow, 0.0
                 b0, _ = env._bottom(env._plate_pose())
@@ -126,6 +126,11 @@ def export_physics(net, env_kw, prefix, episodes=1024, seed=51024):
                      - env.floor_z).clamp(0, 0.10)
                 r[:, 0] += env.lean_follow * math.sin(env.lean0) * h
             res[ids, env.t] = r
+        # (Claude 10/30 fix) an episode ends at floor contact before the last knots: hold its last correction there
+        # (zeros made the replay turn the pitch/x back on the way down; v3-v7 physics numbers before this fix are low)
+        last = res[ids, env.t].clone()
+        after = torch.arange(env.path_steps, device='cuda')[None] > env.t[:, None]
+        res = torch.where(after[..., None], last[:, None], res)
         path = prefix.with_name(prefix.name + f'_{method}.npz')
         np.savez_compressed(path, method=method, seed=seed, job=env.job.cpu().numpy(), H=env.H.cpu().numpy(),
                             kin_feat=kin_features(env).cpu().numpy(),
@@ -158,6 +163,8 @@ def main():
     p.add_argument('--residual_pitch_deg', type=float, default=25.0)
     p.add_argument('--hover_until', type=float, default=0.15)
     p.add_argument('--target_x_mm', type=float, default=0.0, help='goal/seat x offset from the gap root (basket x)')
+    p.add_argument('--speed_action', action='store_true', help='(opt-in) one more action: go down the path or hold')
+    p.add_argument('--freeze_in_tines', action='store_true', help='no correction below the tine tips (physics: turning in the tines pushes plates 2-5 gaps)')
     p.add_argument('--angle_tol_deg', type=float, default=20.0, help='strict-success face angle window (physics: ~6)')
     p.add_argument('--lean_follow', type=float, default=0.0, help='(opt-in) descend along the slot face in the tines')
     p.add_argument('--phys_critic', default='', help='(opt-in) rl/phys_critic.py model: terminal reward += phys_w * P(physics)')
@@ -182,11 +189,20 @@ def main():
               descend_extra_mm=a.descend_extra_mm, residual_pitch_deg=a.residual_pitch_deg,
               hover_until=a.hover_until if a.hover_until > 0 else None, pc_disc_dist=a.disc_dist,
               target_x_mm=a.target_x_mm, phys_critic=a.phys_critic or None, phys_w=a.phys_w,
-              lean_follow=a.lean_follow, angle_tol_deg=a.angle_tol_deg)
+              lean_follow=a.lean_follow, angle_tol_deg=a.angle_tol_deg, freeze_in_tines=a.freeze_in_tines,
+              speed_action=a.speed_action)
     env = DockEnv(a.envs, seed=a.seed, **kw)
     net = PointNetAC(env.pc_m, env.act_dim).cuda()
     if a.init:
-        net.load_state_dict(torch.load(a.init, map_location='cuda', weights_only=True))
+        sd = torch.load(a.init, map_location='cuda', weights_only=True)
+        own = net.state_dict()
+        for k, v in sd.items():                              # a checkpoint with fewer actions: copy the rows it has
+            if own[k].shape != v.shape:
+                w = own[k].clone(); w[:v.shape[0]] = v
+                if k == 'actor.bias' and a.speed_action:
+                    w[-1] = 1.0                              # the new 'go' action starts on (follow the path)
+                sd[k] = w
+        net.load_state_dict(sd)
     net.w.fill_(a.p_weights[stage])
     if a.export_physics:
         print(json.dumps(export_physics(net, kw, a.export_physics), indent=1))

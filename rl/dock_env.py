@@ -52,7 +52,8 @@ class DockEnv:
                  residual_xy_mm=80.0, residual_pitch_deg=15.0, hover_until=None, hover_max=120, hover_step_mm=2.0,
                  hover_tilt_deg=None, target_x_mm=0.0, lean_follow=0.0,
                  depth_obs=False, freeze_in_tines=False, pc_goal=False, pc_points=32, pc_tol_mm=5.0, pc_yaw=False, yaw_deg=0.0, pc_disc_dist=False,
-                 phys_critic=None, phys_w=12.0, angle_tol_deg=20.0):
+                 phys_critic=None, phys_w=12.0, angle_tol_deg=20.0,
+                 speed_action=False):
         self.device = torch.device(device)
         self.n, self.path_steps, self.hover_steps = int(num_envs), int(steps), int(hover_steps)
         # (Claude 10/29 3rd review, opt-in) after the taught end keep going down 2 mm a step until floor contact,
@@ -94,7 +95,14 @@ class DockEnv:
         self.yaw_deg = float(yaw_deg)
         if pc_yaw:
             self.act_dim = 4
-        self.steps = self.path_steps + self.hover_steps + self.extra_steps + (self.hover_max if hover_until else 0)
+        self.res_dim = self.act_dim                           # residual columns (x, y, pitch[, yaw])
+        # (Claude 10/30, opt-in) one more action: > 0 = go on down the path, else hold (correct first, e.g. above the
+        # tips); forced on when the rest of the budget is only enough to finish the path
+        self.speed_action = bool(speed_action)
+        if self.speed_action:
+            self.act_dim += 1
+        self.steps = self.path_steps + self.hover_steps + self.extra_steps + (self.hover_max if hover_until else 0) \
+            + (self.hover_max if self.speed_action else 0)
         self.gen = torch.Generator(device=self.device).manual_seed(int(seed))
         J = np.load(job)
         names = [str(x) for x in J["names"]]
@@ -124,9 +132,9 @@ class DockEnv:
         self.hang_deg, self.grip_m, self.tilt_deg = float(hang_deg), float(grip_mm) / 1000, float(tilt_deg)
         self.basket_xy_m, self.basket_yaw_deg = float(basket_xy_mm) / 1000, float(basket_yaw_deg)
         self.pitch_frac, self.lean_deg = float(pitch_frac), float(lean_deg)
-        self.action_scale = torch.tensor([0.002, 0.002, math.radians(1.0), math.radians(1.0)][:self.act_dim], device=self.device)
+        self.action_scale = torch.tensor([0.002, 0.002, math.radians(1.0), math.radians(1.0)][:self.res_dim], device=self.device)
         self.residual_limit = torch.tensor([residual_xy_mm / 1000, residual_xy_mm / 1000, math.radians(residual_pitch_deg),
-                                            math.radians(25.0)][:self.act_dim], device=self.device)
+                                            math.radians(25.0)][:self.res_dim], device=self.device)
         th = torch.linspace(0, 2 * math.pi, 17, device=self.device)[:-1]
         self.rim_local = torch.stack((self.plate_r * torch.cos(th), self.plate_r * torch.sin(th),
                                       torch.zeros_like(th)), 1)
@@ -146,8 +154,8 @@ class DockEnv:
         self.last_err = torch.full((n,), 9.0, device=d)
         self.last_tilt = torch.full((n,), 9.0, device=d)
         self.zdown = torch.zeros(n, device=d)
-        self.residual = torch.zeros(n, self.act_dim, device=d)
-        self.prev_action = torch.zeros(n, self.act_dim, device=d)
+        self.residual = torch.zeros(n, self.res_dim, device=d)
+        self.prev_action = torch.zeros(n, self.res_dim, device=d)
         self.yaw0 = torch.zeros(n, device=d)
         self.Tbb = torch.eye(4, device=d).repeat(n, 1, 1)
         self.H = torch.eye(4, device=d).repeat(n, 1, 1)
@@ -194,8 +202,8 @@ class DockEnv:
         P[:, :3, 3] += shift
         Ry = _axis_angle(self.Tbb[:, :3, 1], self.residual[:, 2])
         P[:, :3, :3] = Ry @ P[:, :3, :3]
-        if self.yaw_deg or self.act_dim > 3:                 # in-hand yaw (+ the yaw action) about the basket vertical
-            yaw = self.yaw0 + (self.residual[:, 3] if self.act_dim > 3 else 0.0)
+        if self.yaw_deg or self.res_dim > 3:                 # in-hand yaw (+ the yaw action) about the basket vertical
+            yaw = self.yaw0 + (self.residual[:, 3] if self.res_dim > 3 else 0.0)
             P[:, :3, :3] = _axis_angle(self.Tbb[:, :3, 2], yaw) @ P[:, :3, :3]
         if self.lean_follow:
             bottom, _ = self._bottom(P)
@@ -341,7 +349,7 @@ class DockEnv:
         dc[:, 0] += self.target_x
         res = torch.zeros(self.n, 4, device=self.device)
         res[:, :3] = self.residual[:, :3]
-        res[:, 3] = self.yaw0 + (self.residual[:, 3] if self.act_dim > 3 else 0)
+        res[:, 3] = self.yaw0 + (self.residual[:, 3] if self.res_dim > 3 else 0)
         return torch.cat((bottom_b - seat, n_b, dc, res), 1)
 
     def pc_fit(self):
@@ -366,12 +374,19 @@ class DockEnv:
 
     def step(self, action):
         action = action.clamp(-1, 1)
-        if action.shape[1] < self.act_dim:                   # a 3-action controller on the 4-action (yaw) env
+        short = action.shape[1] < self.act_dim
+        if short:                                            # a 3-action controller on the 4-action (yaw) env
             action = torch.cat((action, torch.zeros(len(action), self.act_dim - action.shape[1], device=self.device)), 1)
+        go = None
+        if self.speed_action:                                # controllers without it always go on
+            go = torch.ones(len(action), dtype=torch.bool, device=self.device) if short else action[:, -1] > 0
+            action = action[:, :self.res_dim]
         active = ~self.terminated
         old_action = self.prev_action.clone()
         remaining = 1.0 - self.phase.float() / (self.steps - 1)
         taper = 0.25 + 0.75 * remaining
+        if self.speed_action:                                # the policy sets the pace: no taper
+            taper = torch.ones_like(taper)
         scale = self.action_scale[None] * taper[:, None]
         if self.hover_until is not None:                      # holding: full-size steps, no taper
             holding = self._holding()
@@ -388,6 +403,10 @@ class DockEnv:
         self.prev_action[active] = action[active]
         self.phase[active] += 1
         advance = active & (self.phase > self.hover_steps)
+        if go is not None:
+            left = (self.steps - 1) - self.phase
+            need = (self.path_steps - 1 - self.t) + (self.extra_steps - (self.zdown / 0.002).round().long()) + 1
+            advance &= go | (left <= need)
         if self.hover_until is not None:
             advance &= ~self._holding()
             self.hold_count += (active & self._holding()).long()

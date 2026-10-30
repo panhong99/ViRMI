@@ -5767,3 +5767,9 @@ DockEnv opt-in을 더 넣어 P를 Isaac으로 쟀다(seed 51024, 1024개, 바구
 - 그러나 이것은 작업명에 적힌 **꽂힌 접시의 물리 GT 점군이 아니다**. 같은 LOG의 Isaac 안착 표본 중앙값은 gap root 대비 x **−15.8 mm**, 빗살 면 대비 pitch **+3.8°**인데, 현재 목표는 x 0 mm·pitch 0°의 해석 원판이다. 따라서 현재 stage 통과는 해석 운동학 목표 적합을 뜻하며 실제 안착 자세 학습/실기 전이 근거가 아니다. 물리 안착 `final_T_basket` 표본 또는 실측 seated reference를 목표 점군으로 쓰는 비교가 필요하다.
 - 원판은 축대칭이라 원판 **자체 법선 주위 회전은 Chamfer/PointNet 입력에서 식별 불가능**하다. 현재 4번째 yaw는 basket z축 회전이라 접시가 세워질수록 원판 법선을 바꿔 보이지만, 접시가 수평일 때는 법선 주위 회전과 같아 초반에는 관측되지 않는다. 현 gate도 별도 yaw 오차를 판정하지 않으므로 `--yaw` stage 통과를 손 안 yaw 자체의 회복률로 주장하면 안 된다.
 - stage 0의 P 기준은 pc_success **9.18% [7.56, 11.10]**(n=1024). update 0–180 평가는 약 **3.3–14.3%**로 아직 통과 기준 50%와 멀다. 500 update 전이라 정체 판정은 하지 않으며, stage가 통과하면 다른 seed 4096 독립 평가를 수행한다.
+
+## 주말 Codex 점군 RL 평가 — v2 stage 0–1 독립 seed 4096
+- Claude가 기본 env의 도달 불가능한 stage 0을 확인하고 `descend_extra_mm=40`, pitch ±25°, `hover_until=0.15`로 v2를 재시작한 뒤 stage 0/1이 통과했다. Codex는 학습 GPU와 겹치지 않도록 CPU 4 threads에서 각각 다른 seed **24030/24031**, 4096 episode를 동일 checkpoint와 동일 env 옵션으로 평가했다.
+- stage 0 (30 mm, P weight 1.0, `stage0.pt`): P pc_success **28.76% [27.39, 30.17]**, 정책 **47.24% [45.72, 48.77]**; strict success 67.11→85.64%, median Chamfer 26.70→22.02 mm. 독립 평가에서도 45% gate를 넘고 Wilson CI가 P와 겹치지 않는다.
+- stage 1 (25 mm, P weight 0.85, `stage1.pt`): P **18.97% [17.80, 20.20]**, 정책 **44.46% [42.94, 45.98]**; strict 65.89→83.96%, Chamfer 26.60→18.53 mm. 학습 중 1024 표본 두 번은 46.3/46.2%로 stage를 넘었지만 독립 4096은 **45% gate보다 0.54%p 낮다**. 따라서 stage 1 통과는 경계 결과이며 확정 통과로 주장하지 않는다.
+- 결과: `outputs/dock_rl_20261030/pc_codex_eval/stage0_seed24030_n4096.json`, `stage1_seed24031_n4096.json`. 출력은 data라 git에 넣지 않았다. 학습 PID 2135909는 그대로 두었고 다른 GPU 계산, 실로봇·핸드·카메라·ROS는 실행하지 않았다.

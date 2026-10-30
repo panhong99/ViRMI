@@ -1,6 +1,6 @@
 """(보스 10/30) live GUI of the side-wall camera slot CNN: full frame with the Q3/Q4 crop boxes + each quadrant crop with
 the CNN tips (numbered from the far end, 13 per row) and the target pin band.  Camera read only.
-    ~/miniconda3/envs/foundationpose/bin/python experiments/side_cam/live_view.py [--pin 6] [--frame F.png]
+    ~/miniconda3/envs/foundationpose/bin/python experiments/side_cam/live_view.py [--pin 6] [--frame F.png] [--record 5]
 Keys: [ / ] pin -/+, s save the window to outputs/side_cam_q3_20261029/live/, q quit."""
 import argparse
 import sys
@@ -35,6 +35,8 @@ def main():
     a = argparse.ArgumentParser()
     a.add_argument('--pin', type=int, default=6)
     a.add_argument('--frame', default='', help='a saved frame instead of the live camera')
+    a.add_argument('--record', type=int, default=0, help='save every N-th raw camera frame (no overlay) to '
+                   'outputs/side_cam_q3_20261029/live/rec_HHMMSS/ for later evaluation; 0 = off')
     a = a.parse_args()
     net = S.SE.load(S.CKPT)
     pipe = None
@@ -47,11 +49,19 @@ def main():
     still = cv2.imread(a.frame) if a.frame else None
     out = S.ROOT / 'outputs/side_cam_q3_20261029/live'
     pin, colours = a.pin, dict(Q3=(0, 0, 255), Q4=(255, 80, 0))
+    rec = out / f'rec_{time.strftime("%H%M%S")}' if a.record and still is None else None
+    if rec is not None:
+        rec.mkdir(parents=True, exist_ok=True)
+        print('recording raw frames to', rec, flush=True)
     cv2.namedWindow('side CNN', cv2.WINDOW_NORMAL)
+    i = 0
     try:
         while True:
             t0 = time.time()
             bgr = still if still is not None else np.asanyarray(pipe.wait_for_frames().get_color_frame().get_data())
+            if rec is not None and i % a.record == 0:
+                cv2.imwrite(str(rec / f'{i:06d}.jpg'), bgr, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            i += 1
             full, tiles, status = bgr.copy(), [], []
             for q in ('Q3', 'Q4'):
                 r = S.read(bgr, q, net)
@@ -66,7 +76,7 @@ def main():
                 cv2.putText(tile, msg, (8, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
                 tiles.append(tile)
             info = np.zeros((360, 640, 3), np.uint8)
-            lines = ['side camera 338122303684 - slot CNN run_side_v2/ep07',
+            lines = ['side camera 338122303684 - slot CNN run_side_v2/ep07' + (' - REC' if rec is not None else ''),
                      'sim tip recall 0.994 / precision 0.987', ''] + status + \
                     ['', f'{(time.time() - t0) * 1000:.0f} ms/frame', '[ / ] pin   s save   q quit',
                      'pin k = gap between tines k, k+1 from the far end']

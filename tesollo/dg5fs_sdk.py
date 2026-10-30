@@ -150,7 +150,8 @@ INSERT_VEL = [40.0]         # (보스 10/29) deg/s for the taught insert (1 cm o
 AUTO = [True]               # (보스 10/29) no Enter between the steps: seen -> approach -> grasp -> basket -> release -> home
 TAUGHT_IX = [None]          # (--taught [N], 보스 10/29) plate: basket = the taught insert N of taught_inserts.json
 TAUGHT_PIVOT = ['model']    # (--taught_pivot, 보스 10/30) taught_plan.py --pivot: slot = turn the wrist about the real plate bottom
-INHAND = [False]            # (--inhand_check, 보스 10/30) plate: stop at the lift top, fixed camera measures the plate in the hand
+INHAND = [False]
+INHAND_YAW = [False]        # (--inhand_yaw, 보스 10/30) and re-plan the insert with the measured yaw taken out (taught_plan --yaw_corr)            # (--inhand_check, 보스 10/30) plate: stop at the lift top, fixed camera measures the plate in the hand
 TEACH = [False]             # (--teach, 보스 10/29) plate: the plan stops above the basket, the insert is taught by the pendant
 CONTACT = REPO / 'tesollo/grasp_contact.json'   # finger joints at the end of the last grasp per object (the pre-close target)
 TAUGHT = REPO / 'tesollo/taught_inserts.json'   # every taught insert: joints + basket pose + plate in the hand
@@ -327,15 +328,22 @@ def basket(obj, quadrant, pin, centre_h=None):
             legs, BASKET['out_leg'] = [(m.group(1), one)], back
     if TEACH[0] and obj == 'plate' and TAUGHT_IX[0] is None:   # (보스 10/29) only up to above the basket; the pendant inserts
         legs = [(teach_stop(m.group(1), mg.group(1) if mg else None), 'lift_carry')]
-    q_top = None
+    q_top, first = None, legs[0][1]
     if INHAND[0] and obj == 'plate':
         legs, q_top = inhand_split(legs)
-    for plan, leg in legs:
+    i_leg = 0
+    while i_leg < len(legs):
+        plan, leg = legs[i_leg]
         sparse = leg in ('post_grasp', 'insert', 'return_home', 'carry_insert', 'carry_down', 'inhand_lift', 'inhand_rest')   # few knots: the controller spline smooths them
         if not mover(plan, leg, INSERT_VEL[0] if leg == 'insert' else VEL[0], ['--max_step_deg', '90'] if sparse else []):
             return False
         if leg == 'inhand_lift':
-            inhand_measure(quadrant, pin, q_top)
+            meas = inhand_measure(quadrant, pin, q_top)
+            if meas and INHAND_YAW[0]:
+                rest = inhand_replan(obj, quadrant, pin, meas, q_top, first)
+                if rest:
+                    legs = legs[:i_leg + 1] + rest
+        i_leg += 1
     if TEACH[0] and obj == 'plate' and TAUGHT_IX[0] is None and not teach_insert(m.group(1), quadrant, pin):
         return False
     BASKET['down'] = True
@@ -363,15 +371,45 @@ def inhand_split(legs):
 
 
 def inhand_measure(quadrant, pin, q_top):
-    """experiments/inhand/plate_inhand.py on a frame taken after the stop (read-only); never stops the run."""
+    """experiments/inhand/plate_inhand.py on a frame taken after the stop (read-only); never stops the run.
+    -> its result dict (at_slot.yaw_deg, normal_flange, ...) or None."""
     try:
         r = subprocess.run([str(PLAN_PY), str(REPO / 'experiments/inhand/plate_inhand.py'), '--quadrant', quadrant,
                             '--pin', str(pin), '--new_frame', '--pivot', TAUGHT_PIVOT[0], '--joints'] + [str(v) for v in q_top],
                            capture_output=True, text=True, timeout=30, cwd=str(REPO))
         print('   in-hand check: ' + ((r.stdout.strip().splitlines() or ['(no output)'])[-1] if not r.returncode
                                        else f'failed ({(r.stdout + r.stderr).strip()[-200:]})'), flush=True)
+        if r.returncode:
+            return None
+        return json.loads(r.stdout[r.stdout.index('{'):r.stdout.rindex('}') + 1])
     except Exception as e:                                       # noqa: BLE001 - a check, not part of the motion
         print(f'   in-hand check failed: {e}', flush=True)
+        return None
+
+
+def inhand_replan(obj, quadrant, pin, meas, q_top, first):
+    """(--inhand_yaw) the insert re-planned with the measured yaw taken out -> the legs after the lift top, or None (the
+    planned legs go on unchanged: no / implausible measurement, no plan, or a different lift top)."""
+    yaw = meas.get('at_slot', {}).get('yaw_deg')
+    if yaw is None or abs(yaw) > 30 or meas.get('rim_fit_mad_mm', 99) > 15:
+        print(f'   yaw not corrected (yaw {yaw}, rim fit {meas.get("rim_fit_mad_mm")} mm)', flush=True)
+        return None
+    t0 = time.time()
+    out = subprocess.run(plan_cmd(obj, quadrant, pin) + ['--yaw_corr', f'{-yaw:.1f}', '--normal_flange']
+                         + [str(v) for v in meas['normal_flange']], capture_output=True, text=True)
+    m = re.search(r'^plan: (\S+)', out.stdout, re.M)
+    if out.returncode or not m:
+        print(f'   yaw not corrected: {(out.stdout + out.stderr).strip().splitlines()[-1][:200]}', flush=True)
+        return None
+    legs, q2 = inhand_split([(m.group(1), first)])
+    if q2 is None or max(abs(u - v) for u, v in zip(q2, q_top)) > 0.5:
+        print('   yaw not corrected: the re-plan has another lift top', flush=True)
+        return None
+    if first == 'post_grasp':
+        legs.append((m.group(1), 'insert'))
+    BASKET['plan'] = m.group(1)
+    print(f'   yaw {-yaw:+.1f} deg corrected (re-plan {time.time() - t0:.1f} s): {m.group(1)}', flush=True)
+    return legs[1:]
 
 
 def robot_joints():
@@ -560,6 +598,8 @@ def main():
                    '(default: release, arm home, then open - 보스 10/29)')
     p.add_argument('--taught_pivot', choices=('model', 'slot'), default='model', help='(보스 10/30, opt-in slot) the taught '
                    'insert\'s wrist turn about the real plate bottom at the teaching (model: 4 gaps off at pin 6, the L1 / L2 landings)')
+    p.add_argument('--inhand_yaw', action='store_true', help='(보스 10/30, opt-in; with --inhand_check --taught_pivot slot) '
+                   'take the measured in-hand yaw out: the insert re-planned at the lift top (taught_plan --yaw_corr)')
     p.add_argument('--inhand_check', action='store_true', help='(보스 10/30, opt-in) plate: stop at the lift top, the fixed '
                    'camera measures the plate in the hand (experiments/inhand/plate_inhand.py, read-only), then go on')
     p.add_argument('--stepwise', action='store_true', help='(old) post-grasp legs as before: plate stops 1 cm over the slot '
@@ -574,6 +614,9 @@ def main():
     SMOOTH[0], ACC[0] = not a.stepwise, 1.0 if a.stepwise else a.acc_ratio
     INHAND[0] = a.inhand_check
     TAUGHT_PIVOT[0] = a.taught_pivot
+    INHAND_YAW[0] = a.inhand_yaw and a.inhand_check and a.taught_pivot == 'slot'
+    if a.inhand_yaw and not INHAND_YAW[0]:
+        sys.exit('--inhand_yaw needs --inhand_check and --taught_pivot slot')
     ARM_APPROACH[:] = ['above', 'down'] if a.approach_stop else ARM_APPROACH
     TEACH[0] = a.teach
     INSERT_VEL[0] = a.insert_vel

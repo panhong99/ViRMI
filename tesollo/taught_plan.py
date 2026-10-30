@@ -72,6 +72,11 @@ def main():
                    'model = the planner model plate\'s lowest point (179 mm off the real plate bottom: the 25 deg turn moved '
                    'the plate 69 mm along the row, 4 gaps - the L1 / L2 landings); slot = where the plate bottom was at the '
                    'teaching (the taught gap on the floor), carried with the flange')
+    p.add_argument('--normal_flange', type=float, nargs=3, help='--yaw_corr: the held plate\'s face normal in the flange frame '
+                   '(plate_inhand.py normal_flange)')
+    p.add_argument('--yaw_corr', type=float, default=0.0, help='(보스 10/30, opt-in, needs --pivot slot) turn the held plate '
+                   'this much [deg] about the basket\'s vertical through the plate bottom at every taught pose (the in-hand '
+                   'yaw measured after the lift, negated: plate_inhand.py)')
     a = p.parse_args()
     e = json.loads(TAUGHT.read_text())[a.index]
     pts = e['waypoints_deg']
@@ -164,6 +169,40 @@ def main():
               'J4 / J6 as taught, plate bottom on the taught spot)')
         note += f', wrist {-a.wrist_less:+.0f} deg'
         pts = turned
+    if a.yaw_corr:
+        # (보스 10/30) the held plate turned about the basket's vertical through its bottom.  The wrist sits near J5 = 0
+        # here: a full IK swings J4 / J6 by 60-85 deg.  A round plate only needs its bottom point and its face normal
+        # (5 numbers): J1-J3, J5, J6 solve them with J4 as taught (J6 ~ 1.1 deg per deg of yaw)
+        if not (a.wrist_less and a.pivot == 'slot' and a.normal_flange):
+            sys.exit('--yaw_corr needs --pivot slot, --wrist_less and --normal_flange (plate_inhand.py)')
+        from scipy.optimize import least_squares
+        from scipy.spatial.transform import Rotation
+        nf = np.asarray(a.normal_flange, float) / np.linalg.norm(a.normal_flange)
+        Rz = Rotation.from_rotvec(Tn[:3, 2] * np.radians(a.yaw_corr)).as_matrix()
+        yawed = []
+        for q in pts:
+            q0 = np.radians(q)
+            F = k.fk(q0)
+            piv = F[:3, :3] @ p_slot + F[:3, 3]
+            n_t = Rz @ (F[:3, :3] @ nf)
+
+            def res(x, q0=q0, piv=piv, n_t=n_t):
+                qq = q0.copy()
+                qq[[0, 1, 2, 4, 5]] = x
+                G = k.fk(qq)
+                return np.r_[(G[:3, :3] @ p_slot + G[:3, 3] - piv) * 100, (G[:3, :3] @ nf - n_t) * 10]
+            x = least_squares(res, q0[[0, 1, 2, 4, 5]]).x
+            r = res(x)
+            if np.linalg.norm(r[:3]) > 0.1 or np.degrees(np.linalg.norm(r[3:]) / 10) > 1.0:
+                sys.exit(f'REFUSED: yaw {a.yaw_corr:+.1f} deg at {np.round(q, 1).tolist()}: plate bottom off '
+                         f'{np.linalg.norm(r[:3]) * 10:.1f} mm, face off {np.degrees(np.linalg.norm(r[3:]) / 10):.1f} deg')
+            qq = q0.copy()
+            qq[[0, 1, 2, 4, 5]] = x
+            yawed.append(np.degrees(qq).tolist())
+        print(f'yaw: the plate turned {a.yaw_corr:+.1f} deg about the vertical through its bottom (J4 as taught; J6 at the '
+              f'slot {pts[-1][5]:+.1f} -> {yawed[-1][5]:+.1f}, J5 {pts[-1][4]:+.1f} -> {yawed[-1][4]:+.1f})')
+        note += f', yaw {a.yaw_corr:+.1f} deg'
+        pts = yawed
     T = k.fk(np.radians(grasp))                                  # the lift: straight up --rise; a knot at 5 cm keeps the
     T5 = T.copy()                                                # spline's first part vertical off the stand (10/29: with
     T5[2, 3] += 0.05                                             # only the top knot it swung 14 mm sideways at 2 cm, 26 mm

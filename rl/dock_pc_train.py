@@ -143,6 +143,7 @@ def main():
     p.add_argument('--descend_extra_mm', type=float, default=40.0)
     p.add_argument('--residual_pitch_deg', type=float, default=25.0)
     p.add_argument('--hover_until', type=float, default=0.15)
+    p.add_argument('--target_x_mm', type=float, default=0.0, help='goal/seat x offset from the gap root (basket x)')
     p.add_argument('--plateau', type=int, default=0, help='also move on after this many updates without a new best (0: never)')
     p.add_argument('--epochs', type=int, default=3); p.add_argument('--batch', type=int, default=8192)
     p.add_argument('--lr', type=float, default=3e-4); p.add_argument('--gamma', type=float, default=.99)
@@ -161,7 +162,8 @@ def main():
     stage = a.start_stage
     kw = dict(pc_goal=True, pc_tol_mm=a.tols[stage], pc_yaw=a.yaw, yaw_deg=a.yaw_deg if a.yaw else 0.0,
               descend_extra_mm=a.descend_extra_mm, residual_pitch_deg=a.residual_pitch_deg,
-              hover_until=a.hover_until if a.hover_until > 0 else None, pc_disc_dist=a.disc_dist)
+              hover_until=a.hover_until if a.hover_until > 0 else None, pc_disc_dist=a.disc_dist,
+              target_x_mm=a.target_x_mm)
     env = DockEnv(a.envs, seed=a.seed, **kw)
     net = PointNetAC(env.pc_m, env.act_dim).cuda()
     if a.init:

@@ -15,8 +15,8 @@ from dock_train import ActorCritic  # noqa: E402
 
 
 @torch.no_grad()
-def rollout(policy, envs, seed):
-    env = DockEnv(envs, seed=seed, pc_goal=True)
+def rollout(policy, envs, seed, **env_kw):
+    env = DockEnv(envs, seed=seed, **dict(dict(pc_goal=True), **env_kw))
     obs = env.reset()
     frames = []
     for _ in range(env.steps):

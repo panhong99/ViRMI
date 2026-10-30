@@ -51,7 +51,7 @@ class DockEnv:
                  basket_yaw_deg=1.0, pitch_frac=0.05, lean_deg=3.0, descend_extra_mm=0.0,
                  residual_xy_mm=80.0, residual_pitch_deg=15.0, hover_until=None, hover_max=120, hover_step_mm=2.0,
                  hover_tilt_deg=None, target_x_mm=0.0, lean_follow=0.0,
-                 depth_obs=False, freeze_in_tines=False, pc_goal=False, pc_points=32):
+                 depth_obs=False, freeze_in_tines=False, pc_goal=False, pc_points=32, pc_tol_mm=5.0, pc_yaw=False, yaw_deg=0.0):
         self.device = torch.device(device)
         self.n, self.path_steps, self.hover_steps = int(num_envs), int(steps), int(hover_steps)
         # (Claude 10/29 3rd review, opt-in) after the taught end keep going down 2 mm a step until floor contact,
@@ -76,6 +76,11 @@ class DockEnv:
         self.pc_goal, self.pc_m = bool(pc_goal), int(pc_points)
         if self.pc_goal:
             self.obs_dim = 9 + 6 * self.pc_m
+        self.pc_tol = float(pc_tol_mm) / 1000                  # fit-ratio radius (curriculum: wide first, then tighter)
+        # (opt-in) in-hand yaw about the basket vertical (real grasps: 14-26 deg) and a 4th action that turns it back
+        self.yaw_deg = float(yaw_deg)
+        if pc_yaw:
+            self.act_dim = 4
         self.steps = self.path_steps + self.hover_steps + self.extra_steps + (self.hover_max if hover_until else 0)
         self.gen = torch.Generator(device=self.device).manual_seed(int(seed))
         J = np.load(job)
@@ -106,9 +111,9 @@ class DockEnv:
         self.hang_deg, self.grip_m, self.tilt_deg = float(hang_deg), float(grip_mm) / 1000, float(tilt_deg)
         self.basket_xy_m, self.basket_yaw_deg = float(basket_xy_mm) / 1000, float(basket_yaw_deg)
         self.pitch_frac, self.lean_deg = float(pitch_frac), float(lean_deg)
-        self.action_scale = torch.tensor([0.002, 0.002, math.radians(1.0)], device=self.device)
-        self.residual_limit = torch.tensor([residual_xy_mm / 1000, residual_xy_mm / 1000, math.radians(residual_pitch_deg)],
-                                           device=self.device)
+        self.action_scale = torch.tensor([0.002, 0.002, math.radians(1.0), math.radians(1.0)][:self.act_dim], device=self.device)
+        self.residual_limit = torch.tensor([residual_xy_mm / 1000, residual_xy_mm / 1000, math.radians(residual_pitch_deg),
+                                            math.radians(25.0)][:self.act_dim], device=self.device)
         th = torch.linspace(0, 2 * math.pi, 17, device=self.device)[:-1]
         self.rim_local = torch.stack((self.plate_r * torch.cos(th), self.plate_r * torch.sin(th),
                                       torch.zeros_like(th)), 1)
@@ -128,8 +133,9 @@ class DockEnv:
         self.last_err = torch.full((n,), 9.0, device=d)
         self.last_tilt = torch.full((n,), 9.0, device=d)
         self.zdown = torch.zeros(n, device=d)
-        self.residual = torch.zeros(n, 3, device=d)
-        self.prev_action = torch.zeros(n, 3, device=d)
+        self.residual = torch.zeros(n, self.act_dim, device=d)
+        self.prev_action = torch.zeros(n, self.act_dim, device=d)
+        self.yaw0 = torch.zeros(n, device=d)
         self.Tbb = torch.eye(4, device=d).repeat(n, 1, 1)
         self.H = torch.eye(4, device=d).repeat(n, 1, 1)
         self.pitch = torch.full((n,), self.pitch0, device=d)
@@ -164,6 +170,8 @@ class DockEnv:
         self.Tbb[:, :2, 3] += self._uniform((n, 2), -self.basket_xy_m, self.basket_xy_m)
         self.pitch = self.pitch0 * self._uniform((n,), 1-self.pitch_frac, 1+self.pitch_frac)
         self.lean = self.lean0 + self._uniform((n,), -math.radians(self.lean_deg), math.radians(self.lean_deg))
+        if self.yaw_deg:
+            self.yaw0 = self._uniform((n,), -math.radians(self.yaw_deg), math.radians(self.yaw_deg))
         return self._observe()
 
     def _plate_pose_at(self, path_index):
@@ -173,6 +181,9 @@ class DockEnv:
         P[:, :3, 3] += shift
         Ry = _axis_angle(self.Tbb[:, :3, 1], self.residual[:, 2])
         P[:, :3, :3] = Ry @ P[:, :3, :3]
+        if self.yaw_deg or self.act_dim > 3:                 # in-hand yaw (+ the yaw action) about the basket vertical
+            yaw = self.yaw0 + (self.residual[:, 3] if self.act_dim > 3 else 0.0)
+            P[:, :3, :3] = _axis_angle(self.Tbb[:, :3, 2], yaw) @ P[:, :3, :3]
         if self.lean_follow:
             bottom, _ = self._bottom(P)
             h = ((self.Tbb[:, :3, :3].transpose(1, 2) @ (bottom - self.Tbb[:, :3, 3])[..., None]).squeeze(-1)[:, 2]
@@ -308,10 +319,12 @@ class DockEnv:
         cur, goal = self._clouds(P, root_x, yc)
         D = torch.cdist(cur, goal)
         a, b = D.min(2).values, D.min(1).values
-        return (a < 0.005).float().mean(1), (a.mean(1) + b.mean(1)) / 2
+        return (a < self.pc_tol).float().mean(1), (a.mean(1) + b.mean(1)) / 2
 
     def step(self, action):
         action = action.clamp(-1, 1)
+        if action.shape[1] < self.act_dim:                   # a 3-action controller on the 4-action (yaw) env
+            action = torch.cat((action, torch.zeros(len(action), self.act_dim - action.shape[1], device=self.device)), 1)
         active = ~self.terminated
         old_action = self.prev_action.clone()
         remaining = 1.0 - self.phase.float() / (self.steps - 1)

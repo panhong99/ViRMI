@@ -306,3 +306,15 @@ Phase 2 작업판이다(10/20 보스 시작). Phase 1(10/22 시연까지)의 작
 
 ## 보스 대기 과제 (10/30 오전 등록, 지금 하는 손 안 접시 측정이 끝난 뒤)
 - 접시가 테이블 뒤쪽(로봇에서 먼 쪽)에 있어도 잡을 수 있게 접근 경로 생성. 10/29에 "red plate 위치에서 경로 생성이 힘들다"고 한 것과 같은 문제. 새 동작은 opt-in, 데모 기본값은 유지.
+
+## 주말 10/30(금) 15:00 – 11/2(월) 보스 부재: 점군 목표 도킹 RL (Claude + Codex)
+보스 지시: 꽂힌 접시의 GT 점군에 맞추는 방식으로, P 제어기를 RL로 조금씩 걷어낸다. 처음엔 여유 있게, 점진적으로 엄격하게.
+- 실행 중 (Claude, 14:55, setsid): `rl/dock_pc_train.py --out outputs/dock_rl_20261030/pc_curr_v1 --yaw --tols 30 25 20 15 10 7 5 --p_weights 1 0.85 0.7 0.55 0.4 0.2 0 --max_updates 3000`, 로그 `outputs/dock_rl_20261030/pc_curr_v1.log`, 진행 `.../pc_curr_v1/progress.jsonl`, 단계마다 `stage<k>.pt/.png`.
+  - 행동 = w·P + s·tanh(정책), 단계마다 w 1→0, fit 반경 30→5 mm. 통과 = 운동학 성공 & 끝 fit ≥ 0.8 이 0.5 이상 2회 연속. PointNet(점마다 MLP + max pool), yaw ±10° 외란 + yaw 행동.
+  - GPU 최대 1.0 GB(OOM 없음). 같은 GPU에 다른 학습을 띄우기 전 nvidia-smi 확인.
+- **Codex 할 일**
+  1. 커밋 검토: dock_env.py `--pc_goal/pc_tol_mm/pc_yaw/yaw_deg`, dock_pc_train.py. 특히 (a) GT 원판 정의(`_clouds`: 칸 뿌리 바닥 + 빗살 기울기 면)가 criteria()와 맞는지, (b) 원판이 축대칭이라 yaw가 점군에서 보이는지(점군 대응 없음, Chamfer) — 안 보이면 지적.
+  2. 독립 평가: 단계 통과 체크포인트마다 seed 다른 4096 에피소드로 P 제어기 대비 성공률·Chamfer(Wilson 95 %) → LOG에 `## 주말 Codex 점군 RL 평가`.
+  3. 한 단계에서 500 업데이트 넘게 정체하면 원인 분석(보상 규모, 행동 한계 yaw 25°, 관측 정규화) 후 LOG에 제안. 학습 재시작은 Claude와 TASKBOARD로 합의 후 한쪽만.
+- Claude: 1–2시간마다 진행 확인, 단계 통과 시 png와 수치를 보스에게 보고, 정체 시 수정·재시작.
+- 실기 명령 금지(로봇·핸드). 시뮬만.

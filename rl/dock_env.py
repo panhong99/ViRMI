@@ -53,7 +53,8 @@ class DockEnv:
                  hover_tilt_deg=None, target_x_mm=0.0, lean_follow=0.0,
                  depth_obs=False, freeze_in_tines=False, pc_goal=False, pc_points=32, pc_tol_mm=5.0, pc_yaw=False, yaw_deg=0.0, pc_disc_dist=False,
                  phys_critic=None, phys_w=12.0, angle_tol_deg=20.0,
-                 speed_action=False, pc_noise_mm=2.0, pc_bias_mm=0.0, pc_bias_deg=0.0):
+                 speed_action=False, pc_noise_mm=2.0, pc_bias_mm=0.0, pc_bias_deg=0.0,
+                 pc_random=False, pc_occlude_deg=0.0, goal_bias_mm=0.0, goal_bias_deg=0.0):
         self.device = torch.device(device)
         self.n, self.path_steps, self.hover_steps = int(num_envs), int(steps), int(hover_steps)
         # (Claude 10/29 3rd review, opt-in) after the taught end keep going down 2 mm a step until floor contact,
@@ -83,6 +84,11 @@ class DockEnv:
         # plus one rigid offset per episode (the in-hand measurement's bias: real grasps yaw std 1.5 deg, centre spread)
         self.pc_noise = float(pc_noise_mm) / 1000
         self.pc_bias_m, self.pc_bias_rad = float(pc_bias_mm) / 1000, math.radians(float(pc_bias_deg))
+        # (보스 10/31, opt-in) observed points drawn at random on the disc each episode (plate and goal separately),
+        # a random sector up to pc_occlude_deg missing on the plate (hand/tines), and a per-episode error of the goal
+        # (the basket pose estimate: x/y/z +/- goal_bias_mm, yaw +/- goal_bias_deg about the basket vertical)
+        self.pc_random, self.pc_occlude = bool(pc_random), math.radians(float(pc_occlude_deg))
+        self.goal_bias_m, self.goal_bias_rad = float(goal_bias_mm) / 1000, math.radians(float(goal_bias_deg))
         # (Claude 10/30 Isaac v4 failures: face 19.9 +/- 8.4 deg vs successes 11.6 +/- 3.7, tine lean ~11) the strict
         # angle window; 20 lets plates that topple in physics count as seated
         self.angle_tol = math.radians(float(angle_tol_deg))
@@ -201,7 +207,28 @@ class DockEnv:
             self.bias_R = _axis_angle(torch.randn(n, 3, generator=self.gen, device=d),
                                       self._uniform((n,), -self.pc_bias_rad, self.pc_bias_rad))
             self.bias_t = self._uniform((n, 3), -self.pc_bias_m, self.pc_bias_m)
+        if self.pc_random:
+            self.obs_local = self._random_disc(n, self.pc_occlude)
+            self.goal_local = self._random_disc(n, 0.0)
+        if self.goal_bias_m or self.goal_bias_rad:
+            self.goal_bias_R = _axis_angle(torch.tensor([0., 0., 1.], device=d).expand(n, -1),
+                                           self._uniform((n,), -self.goal_bias_rad, self.goal_bias_rad))
+            self.goal_bias_t = self._uniform((n, 3), -self.goal_bias_m, self.goal_bias_m)
         return self._observe()
+
+    def _random_disc(self, n, occlude):
+        """(n, M, 3) points uniform on the plate disc (local frame), none inside one random sector of width <= occlude."""
+        k = 4 * self.pc_m
+        r = self.plate_r * torch.sqrt(torch.rand(n, k, generator=self.gen, device=self.device))
+        a = 2 * math.pi * torch.rand(n, k, generator=self.gen, device=self.device)
+        key = torch.rand(n, k, generator=self.gen, device=self.device)
+        if occlude:
+            a0 = 2 * math.pi * torch.rand(n, 1, generator=self.gen, device=self.device)
+            w = occlude * torch.rand(n, 1, generator=self.gen, device=self.device)
+            key = torch.where(torch.remainder(a - a0, 2 * math.pi) < w, key - 2.0, key)
+        idx = key.topk(self.pc_m, dim=1).indices
+        r, a = r.gather(1, idx), a.gather(1, idx)
+        return torch.stack((r * torch.cos(a), r * torch.sin(a), torch.zeros_like(r)), 2)
 
     def _plate_pose_at(self, path_index):
         P = self.paths[self.job, path_index] @ self.H
@@ -323,7 +350,13 @@ class DockEnv:
                          self.band_valid.float()), 1).clamp(-5, 5)
         if not self.pc_goal:
             return o
-        cur, goal = self._clouds(P, root_x, yc)
+        if self.pc_random:
+            cur, goal = self._clouds(P, root_x, yc, self.obs_local, self.goal_local)
+        else:
+            cur, goal = self._clouds(P, root_x, yc)
+        if self.goal_bias_m or self.goal_bias_rad:          # the goal as estimated from a wrong basket pose
+            gm = goal.mean(1, keepdim=True)
+            goal = ((goal - gm) @ self.goal_bias_R.transpose(1, 2)) + gm + self.goal_bias_t[:, None]
         c0 = goal.mean(1, keepdim=True)
         if self.pc_bias_m or self.pc_bias_rad:              # rigid bias about the plate's own centre
             m = cur.mean(1, keepdim=True)
@@ -331,18 +364,19 @@ class DockEnv:
         noisy = cur + torch.randn(cur.shape, generator=self.gen, device=self.device) * self.pc_noise
         return torch.cat((o, ((noisy - c0) / 0.1).flatten(1).clamp(-5, 5), ((goal - c0) / 0.1).flatten(1)), 1)
 
-    def _clouds(self, P, root_x, yc):
-        """-> the plate's points and the seated-goal points (N,M,3) in the basket frame."""
+    def _clouds(self, P, root_x, yc, local=None, local_goal=None):
+        """-> the plate's points and the seated-goal points (N,M,3) in the basket frame (local: per-env disc points)."""
         R = self.Tbb[:, :3, :3].transpose(1, 2)
-        X = (P[:, :3, :3] @ self.disc_local.T).transpose(1, 2) + P[:, None, :3, 3]
+        Lc = self.disc_local.expand(self.n, -1, -1) if local is None else local
+        X = (P[:, None, :3, :3] @ Lc[..., None]).squeeze(-1) + P[:, None, :3, 3]
         cur = (R @ (X - self.Tbb[:, None, :3, 3]).transpose(1, 2)).transpose(1, 2)
         s, c = torch.sin(self.lean), torch.cos(self.lean)
         z0 = torch.zeros_like(s)
         u = torch.stack((-s, z0, c), 1)                    # up in the seated face (tine lean about basket y)
         v = torch.stack((z0, torch.ones_like(s), z0), 1)
         centre = torch.stack((root_x, yc, torch.full_like(yc, self.floor_z)), 1) + self.plate_r * u
-        L = self.disc_local
-        goal = centre[:, None] + L[None, :, 0:1] * u[:, None] + L[None, :, 1:2] * v[:, None]
+        L = self.disc_local.expand(self.n, -1, -1) if local_goal is None else local_goal
+        goal = centre[:, None] + L[:, :, 0:1] * u[:, None] + L[:, :, 1:2] * v[:, None]
         return cur, goal
 
     @torch.no_grad()

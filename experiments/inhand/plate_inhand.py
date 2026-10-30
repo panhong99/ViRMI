@@ -27,12 +27,15 @@ R_PLATE = 0.135                                    # real plates 27.3 / 26.8 cm 
 LEAN = np.radians(12.5)
 
 
-def frame():
-    """tesollo/fixed_frames.py: the spectator view's shared frame (newest), else the camera opened once."""
+def frame(new=False):
+    """tesollo/fixed_frames.py: the spectator view's shared frame (new: one taken after this call), else the camera
+    opened once."""
     import plate_plans as pp
     sys.path.insert(0, str(ROOT / 'tesollo'))
     from fixed_frames import FixedFrames
     cam = FixedFrames(pp.C['cameras']['fixed_serial'])
+    if new and cam.cam is None:
+        cam.last = time.time()                                   # the arm has just stopped: a frame after that
     try:
         for _ in range(1 if cam.cam is None else 15):          # an opened camera: auto exposure settles
             f = cam.read()
@@ -112,6 +115,7 @@ def main():
     a.add_argument('--pin', type=int, default=6)
     a.add_argument('--joints', type=float, nargs=6, help='instead of reading the robot (offline check)')
     a.add_argument('--frame', default='', help='a saved .npz (rgb, depth, K) instead of the camera')
+    a.add_argument('--new_frame', action='store_true', help='a shared frame taken after the call (dg5fs_sdk --inhand_check)')
     a = a.parse_args()
     import calib_core as cc
     import plate_plans as pp
@@ -121,7 +125,7 @@ def main():
         z = np.load(a.frame)
         rgb, depth, K, src = z['rgb'], z['depth'].astype(np.float32), z['K'].astype(float), a.frame
     else:
-        rgb, depth, K, src = frame()
+        rgb, depth, K, src = frame(a.new_frame)
     q = np.array(a.joints) if a.joints else joints()
     t_in = time.time() - t0
     Tbc = np.array(cc.load_json(cc.latest_t_base_cam())['T_base_cam'])

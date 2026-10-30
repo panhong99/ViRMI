@@ -149,6 +149,7 @@ GRIPPER = [False, None]     # (--gripper_path [--wrist d4 d5 d6], 보스 10/29) 
 INSERT_VEL = [40.0]         # (보스 10/29) deg/s for the taught insert (1 cm over the slot -> in), --insert_vel
 AUTO = [True]               # (보스 10/29) no Enter between the steps: seen -> approach -> grasp -> basket -> release -> home
 TAUGHT_IX = [None]          # (--taught [N], 보스 10/29) plate: basket = the taught insert N of taught_inserts.json
+INHAND = [False]            # (--inhand_check, 보스 10/30) plate: stop at the lift top, fixed camera measures the plate in the hand
 TEACH = [False]             # (--teach, 보스 10/29) plate: the plan stops above the basket, the insert is taught by the pendant
 CONTACT = REPO / 'tesollo/grasp_contact.json'   # finger joints at the end of the last grasp per object (the pre-close target)
 TAUGHT = REPO / 'tesollo/taught_inserts.json'   # every taught insert: joints + basket pose + plate in the hand
@@ -324,16 +325,51 @@ def basket(obj, quadrant, pin, centre_h=None):
             legs, BASKET['out_leg'] = [(m.group(1), one)], back
     if TEACH[0] and obj == 'plate' and TAUGHT_IX[0] is None:   # (보스 10/29) only up to above the basket; the pendant inserts
         legs = [(teach_stop(m.group(1), mg.group(1) if mg else None), 'lift_carry')]
+    q_top = None
+    if INHAND[0] and obj == 'plate':
+        legs, q_top = inhand_split(legs)
     for plan, leg in legs:
-        sparse = leg in ('post_grasp', 'insert', 'return_home', 'carry_insert', 'carry_down')   # few knots: the controller spline smooths them
+        sparse = leg in ('post_grasp', 'insert', 'return_home', 'carry_insert', 'carry_down', 'inhand_lift', 'inhand_rest')   # few knots: the controller spline smooths them
         if not mover(plan, leg, INSERT_VEL[0] if leg == 'insert' else VEL[0], ['--max_step_deg', '90'] if sparse else []):
             return False
+        if leg == 'inhand_lift':
+            inhand_measure(quadrant, pin, q_top)
     if TEACH[0] and obj == 'plate' and TAUGHT_IX[0] is None and not teach_insert(m.group(1), quadrant, pin):
         return False
     BASKET['down'] = True
     record(*BASKET['target'])
     print('   in the basket: type "release"', flush=True)
     return True
+
+
+def inhand_split(legs):
+    """(보스 10/30, --inhand_check) the plate's first post-grasp leg cut at the lift top (last knot before joint 1 turns)
+    into 'inhand_lift' / 'inhand_rest' (a copy of the plan) -> (legs, lift-top joints) or (legs, None) unchanged."""
+    plan_path, first = legs[0]
+    if first not in ('post_grasp', 'carry_insert'):
+        return legs, None
+    plan = json.loads(Path(plan_path).read_text())
+    W = plan['legs'][first]['waypoints_deg']
+    top = next((i for i in range(len(W)) if abs(W[i][0] - W[0][0]) >= 0.5), len(W)) - 1
+    if top < 1 or top >= len(W) - 1:
+        return legs, None
+    plan['legs']['inhand_lift'] = dict(plan['legs'][first], waypoints_deg=W[:top + 1])
+    plan['legs']['inhand_rest'] = dict(plan['legs'][first], waypoints_deg=W[top:])
+    out = Path(plan_path).with_name('plan_inhand.json')
+    out.write_text(json.dumps(plan, indent=1))
+    return [(str(out), 'inhand_lift'), (str(out), 'inhand_rest')] + legs[1:], W[top]
+
+
+def inhand_measure(quadrant, pin, q_top):
+    """experiments/inhand/plate_inhand.py on a frame taken after the stop (read-only); never stops the run."""
+    try:
+        r = subprocess.run([str(PLAN_PY), str(REPO / 'experiments/inhand/plate_inhand.py'), '--quadrant', quadrant,
+                            '--pin', str(pin), '--new_frame', '--joints'] + [str(v) for v in q_top],
+                           capture_output=True, text=True, timeout=30, cwd=str(REPO))
+        print('   in-hand check: ' + ((r.stdout.strip().splitlines() or ['(no output)'])[-1] if not r.returncode
+                                       else f'failed ({(r.stdout + r.stderr).strip()[-200:]})'), flush=True)
+    except Exception as e:                                       # noqa: BLE001 - a check, not part of the motion
+        print(f'   in-hand check failed: {e}', flush=True)
 
 
 def robot_joints():
@@ -520,6 +556,8 @@ def main():
                    'leaned back than taught, plate bottom kept on the slot [deg] (보스 10/29: 25; 0 = as taught)')
     p.add_argument('--open_first', action='store_true', help='(old) open the hand in the basket before the arm goes home '
                    '(default: release, arm home, then open - 보스 10/29)')
+    p.add_argument('--inhand_check', action='store_true', help='(보스 10/30, opt-in) plate: stop at the lift top, the fixed '
+                   'camera measures the plate in the hand (experiments/inhand/plate_inhand.py, read-only), then go on')
     p.add_argument('--stepwise', action='store_true', help='(old) post-grasp legs as before: plate stops 1 cm over the slot '
                    'and inserts at --insert_vel, bowl stops above its quadrant; acc = vel')
     p.add_argument('--acc_ratio', type=float, default=0.5, help='arm acc [deg/s^2] = this x --vel (보스 10/29: softer starts / '
@@ -530,6 +568,7 @@ def main():
     VEL[0] = a.vel
     LIFT_M[0], TAUGHT_LESS[0], BOWL_LIFT[0] = a.lift, a.taught_wrist_less, a.bowl_lift
     SMOOTH[0], ACC[0] = not a.stepwise, 1.0 if a.stepwise else a.acc_ratio
+    INHAND[0] = a.inhand_check
     ARM_APPROACH[:] = ['above', 'down'] if a.approach_stop else ARM_APPROACH
     TEACH[0] = a.teach
     INSERT_VEL[0] = a.insert_vel

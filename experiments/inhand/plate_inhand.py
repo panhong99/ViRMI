@@ -65,8 +65,20 @@ def cloud(depth, K, T_base_cam, step=2):
     return Xc @ T_base_cam[:3, :3].T + T_base_cam[:3, 3], np.c_[u, v]
 
 
-def plate_plane(X, flange, rng, tol=0.004, iters=600):
-    sel = (np.linalg.norm(X - flange, axis=1) < 0.30) & (X[:, 2] > 0.02)
+def off_arm(k, q_deg, X, r=0.08):
+    """(10/30 real run: the plane took the forearm too) False for points within r of the arm's link chain base..link_5."""
+    fr = k.frames(np.radians(q_deg))
+    O = [fr[n][:3, 3] for n in ['base_link'] + [f'link_{i}' for i in range(1, 6)]]
+    keep = np.ones(len(X), bool)
+    for a, b in zip(O[:-1], O[1:]):
+        ab = b - a
+        t = np.clip(((X - a) @ ab) / max(ab @ ab, 1e-9), 0, 1)
+        keep &= np.linalg.norm(X - (a + t[:, None] * ab), axis=1) > r
+    return keep
+
+
+def plate_plane(X, flange, rng, tol=0.004, iters=600, keep=None):
+    sel = (np.linalg.norm(X - flange, axis=1) < 0.30) & (X[:, 2] > 0.02) & (True if keep is None else keep)
     P = X[sel]
     if len(P) < 200:
         return None
@@ -131,11 +143,20 @@ def main():
     Tbc = np.array(cc.load_json(cc.latest_t_base_cam())['T_base_cam'])
     F = k.fk(np.radians(q))
     X, UV = cloud(depth, K, Tbc)
-    r = plate_plane(X, F[:3, 3], np.random.default_rng(0))
+    r = plate_plane(X, F[:3, 3], np.random.default_rng(0), keep=off_arm(k, q, X))
     if r is None:
         sys.exit('no depth points near the hand')
     Q, c, n, idx = r
     centre, rim_mad = circle_centre(Q, c, n)
+    for _ in range(2):                                     # refit on the points of that plate disc only
+        d = (Q - centre) @ n
+        inside = np.linalg.norm((Q - centre) - d[:, None] * n, axis=1) < R_PLATE + 0.01
+        if inside.sum() < 100:
+            break
+        Q, idx = Q[inside], idx[inside]
+        c = Q.mean(0)
+        n = np.linalg.svd(Q - c)[2][2]
+        centre, rim_mad = circle_centre(Q, c, n)
     t_meas = time.time() - t0 - t_in
     # plate in the flange, then at the taught slot pose of the target
     n_f, c_f = F[:3, :3].T @ n, np.linalg.inv(F) @ np.r_[centre, 1.0]

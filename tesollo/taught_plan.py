@@ -72,6 +72,10 @@ def main():
                    'model = the planner model plate\'s lowest point (179 mm off the real plate bottom: the 25 deg turn moved '
                    'the plate 69 mm along the row, 4 gaps - the L1 / L2 landings); slot = where the plate bottom was at the '
                    'teaching (the taught gap on the floor), carried with the flange')
+    p.add_argument('--slot_dx', type=float, default=0.0, help='(보스 10/30, opt-in) move the taught insert this much [mm] along the '
+                   'basket x (+ = toward higher-x gaps, ~17.4 mm a gap)')
+    p.add_argument('--slot_dy', type=float, default=0.0, help='(보스 10/30, opt-in) move the taught insert this much [mm] along the '
+                   'basket y (+ = toward the L row, - = R)')
     p.add_argument('--normal_flange', type=float, nargs=3, help='--yaw_corr: the held plate\'s face normal in the flange frame '
                    '(plate_inhand.py normal_flange)')
     p.add_argument('--yaw_corr', type=float, default=0.0, help='(보스 10/30, opt-in, needs --pivot slot) turn the held plate '
@@ -100,6 +104,10 @@ def main():
         d_b = g[pp.pin_gap(Tt, mq, pin)] - g[pp.pin_gap(Tt, mq, e['pin'])]
         S = np.eye(4)
         S[:3, 3] = Tt[:3, :3] @ d_b
+        D = D @ S
+    if a.slot_dx or a.slot_dy:                                   # (보스 10/30: "a little to the left") the whole insert moved
+        S = np.eye(4)
+        S[:3, 3] = Tt[:3, :3] @ np.array([a.slot_dx, a.slot_dy, 0.0]) / 1000
         D = D @ S
     dmm = np.linalg.norm(D[:3, 3]) * 1000
     ddeg = np.degrees(np.arccos(np.clip((np.trace(D[:3, :3]) - 1) / 2, -1, 1)))

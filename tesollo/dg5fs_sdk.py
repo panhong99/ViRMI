@@ -149,6 +149,7 @@ GRIPPER = [False, None]     # (--gripper_path [--wrist d4 d5 d6], 보스 10/29) 
 INSERT_VEL = [40.0]         # (보스 10/29) deg/s for the taught insert (1 cm over the slot -> in), --insert_vel
 AUTO = [True]               # (보스 10/29) no Enter between the steps: seen -> approach -> grasp -> basket -> release -> home
 TAUGHT_IX = [None]          # (--taught [N], 보스 10/29) plate: basket = the taught insert N of taught_inserts.json
+SLOT_SHIFT = [0.0, 0.0]     # (--slot_dx / --slot_dy [mm], 보스 10/30) taught_plan.py --slot_dx / --slot_dy
 TAUGHT_PIVOT = ['model']    # (--taught_pivot, 보스 10/30) taught_plan.py --pivot: slot = turn the wrist about the real plate bottom
 INHAND = [False]
 INHAND_YAW = [False]        # (--inhand_yaw, 보스 10/30) and re-plan the insert with the measured yaw taken out (taught_plan --yaw_corr)            # (--inhand_check, 보스 10/30) plate: stop at the lift top, fixed camera measures the plate in the hand
@@ -271,7 +272,8 @@ def plan_cmd(obj, quadrant, pin, centre_h=None):
     if TAUGHT_IX[0] is not None and obj == 'plate':      # (보스 10/29) the pendant-taught insert, one sparse spline after
         return ([str(PLAN_PY), str(REPO / 'tesollo/taught_plan.py'), '--index', str(TAUGHT_IX[0]),    # the grasp
                  '--quadrant', quadrant, '--pin', str(pin), '--dx', str(SHIFT[0]), '--dy', str(SHIFT[1]),
-                 '--rise', str(LIFT_M[0]), '--wrist_less', str(TAUGHT_LESS[0]), '--pivot', TAUGHT_PIVOT[0]]
+                 '--rise', str(LIFT_M[0]), '--wrist_less', str(TAUGHT_LESS[0]), '--pivot', TAUGHT_PIVOT[0],
+                 '--slot_dx', str(SLOT_SHIFT[0]), '--slot_dy', str(SLOT_SHIFT[1])]
                 + (['--smooth'] if SMOOTH[0] else [])
                 + (['--basket', BASKET_JSON[0]] if BASKET_JSON[0] else []))
     return ([str(PLAN_PY), str(REPO / 'tesollo/basket_plan.py'), '--object', obj, '--quadrant', quadrant,
@@ -598,6 +600,9 @@ def main():
                    '(default: release, arm home, then open - 보스 10/29)')
     p.add_argument('--taught_pivot', choices=('model', 'slot'), default='model', help='(보스 10/30, opt-in slot) the taught '
                    'insert\'s wrist turn about the real plate bottom at the teaching (model: 4 gaps off at pin 6, the L1 / L2 landings)')
+    p.add_argument('--slot_dx', type=float, default=0.0, help='(보스 10/30, opt-in) taught insert moved along the basket x [mm]')
+    p.add_argument('--slot_dy', type=float, default=0.0, help='(보스 10/30, opt-in) taught insert moved along the basket y [mm] '
+                   '(+ = toward the L row)')
     p.add_argument('--inhand_yaw', action='store_true', help='(보스 10/30, opt-in; with --inhand_check --taught_pivot slot) '
                    'take the measured in-hand yaw out: the insert re-planned at the lift top (taught_plan --yaw_corr)')
     p.add_argument('--inhand_check', action='store_true', help='(보스 10/30, opt-in) plate: stop at the lift top, the fixed '
@@ -614,6 +619,7 @@ def main():
     SMOOTH[0], ACC[0] = not a.stepwise, 1.0 if a.stepwise else a.acc_ratio
     INHAND[0] = a.inhand_check
     TAUGHT_PIVOT[0] = a.taught_pivot
+    SLOT_SHIFT[:] = [a.slot_dx, a.slot_dy]
     INHAND_YAW[0] = a.inhand_yaw and a.inhand_check and a.taught_pivot == 'slot'
     if a.inhand_yaw and not INHAND_YAW[0]:
         sys.exit('--inhand_yaw needs --inhand_check and --taught_pivot slot')

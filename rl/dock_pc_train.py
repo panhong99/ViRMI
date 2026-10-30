@@ -163,6 +163,9 @@ def main():
     p.add_argument('--residual_pitch_deg', type=float, default=25.0)
     p.add_argument('--hover_until', type=float, default=0.15)
     p.add_argument('--target_x_mm', type=float, default=0.0, help='goal/seat x offset from the gap root (basket x)')
+    p.add_argument('--pc_noise_mm', type=float, default=2.0)
+    p.add_argument('--pc_bias_mm', type=float, default=0.0, help='(opt-in) rigid per-episode offset of the measured cloud')
+    p.add_argument('--pc_bias_deg', type=float, default=0.0)
     p.add_argument('--speed_action', action='store_true', help='(opt-in) one more action: go down the path or hold')
     p.add_argument('--freeze_in_tines', action='store_true', help='no correction below the tine tips (physics: turning in the tines pushes plates 2-5 gaps)')
     p.add_argument('--angle_tol_deg', type=float, default=20.0, help='strict-success face angle window (physics: ~6)')
@@ -191,7 +194,7 @@ def main():
               hover_until=a.hover_until if a.hover_until > 0 else None, pc_disc_dist=a.disc_dist,
               target_x_mm=a.target_x_mm, phys_critic=a.phys_critic or None, phys_w=a.phys_w,
               lean_follow=a.lean_follow, angle_tol_deg=a.angle_tol_deg, freeze_in_tines=a.freeze_in_tines,
-              speed_action=a.speed_action)
+              speed_action=a.speed_action, pc_noise_mm=a.pc_noise_mm, pc_bias_mm=a.pc_bias_mm, pc_bias_deg=a.pc_bias_deg)
     env = DockEnv(a.envs, seed=a.seed, **kw)
     net = PointNetAC(env.pc_m, env.act_dim).cuda()
     if a.init:

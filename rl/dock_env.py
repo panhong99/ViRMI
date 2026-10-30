@@ -53,7 +53,7 @@ class DockEnv:
                  hover_tilt_deg=None, target_x_mm=0.0, lean_follow=0.0,
                  depth_obs=False, freeze_in_tines=False, pc_goal=False, pc_points=32, pc_tol_mm=5.0, pc_yaw=False, yaw_deg=0.0, pc_disc_dist=False,
                  phys_critic=None, phys_w=12.0, angle_tol_deg=20.0,
-                 speed_action=False):
+                 speed_action=False, pc_noise_mm=2.0, pc_bias_mm=0.0, pc_bias_deg=0.0):
         self.device = torch.device(device)
         self.n, self.path_steps, self.hover_steps = int(num_envs), int(steps), int(hover_steps)
         # (Claude 10/29 3rd review, opt-in) after the taught end keep going down 2 mm a step until floor contact,
@@ -79,6 +79,10 @@ class DockEnv:
         if self.pc_goal:
             self.obs_dim = 9 + 6 * self.pc_m
         self.pc_disc_dist = bool(pc_disc_dist)
+        # (Claude 10/30, opt-in) measurement error of the held plate's cloud: per-point noise (default 2 mm as before)
+        # plus one rigid offset per episode (the in-hand measurement's bias: real grasps yaw std 1.5 deg, centre spread)
+        self.pc_noise = float(pc_noise_mm) / 1000
+        self.pc_bias_m, self.pc_bias_rad = float(pc_bias_mm) / 1000, math.radians(float(pc_bias_deg))
         # (Claude 10/30 Isaac v4 failures: face 19.9 +/- 8.4 deg vs successes 11.6 +/- 3.7, tine lean ~11) the strict
         # angle window; 20 lets plates that topple in physics count as seated
         self.angle_tol = math.radians(float(angle_tol_deg))
@@ -193,6 +197,10 @@ class DockEnv:
         self.lean = self.lean0 + self._uniform((n,), -math.radians(self.lean_deg), math.radians(self.lean_deg))
         if self.yaw_deg:
             self.yaw0 = self._uniform((n,), -math.radians(self.yaw_deg), math.radians(self.yaw_deg))
+        if self.pc_bias_m or self.pc_bias_rad:              # drawn only then: the default random stream stays as before
+            self.bias_R = _axis_angle(torch.randn(n, 3, generator=self.gen, device=d),
+                                      self._uniform((n,), -self.pc_bias_rad, self.pc_bias_rad))
+            self.bias_t = self._uniform((n, 3), -self.pc_bias_m, self.pc_bias_m)
         return self._observe()
 
     def _plate_pose_at(self, path_index):
@@ -317,7 +325,10 @@ class DockEnv:
             return o
         cur, goal = self._clouds(P, root_x, yc)
         c0 = goal.mean(1, keepdim=True)
-        noisy = cur + torch.randn(cur.shape, generator=self.gen, device=self.device) * 0.002
+        if self.pc_bias_m or self.pc_bias_rad:              # rigid bias about the plate's own centre
+            m = cur.mean(1, keepdim=True)
+            cur = ((cur - m) @ self.bias_R.transpose(1, 2)) + m + self.bias_t[:, None]
+        noisy = cur + torch.randn(cur.shape, generator=self.gen, device=self.device) * self.pc_noise
         return torch.cat((o, ((noisy - c0) / 0.1).flatten(1).clamp(-5, 5), ((goal - c0) / 0.1).flatten(1)), 1)
 
     def _clouds(self, P, root_x, yc):

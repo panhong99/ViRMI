@@ -94,6 +94,35 @@ def snapshot(net, env_kw, path, envs=4, seed=7):
     fig.tight_layout(); fig.savefig(path, dpi=90); plt.close(fig)
 
 
+@torch.no_grad()
+def export_physics(net, env_kw, prefix, episodes=1024, seed=51024):
+    """P and policy residual paths for hand_basket.py --dock_traj (fixed basket, as dock_train.export_physics), with a
+    4th column = in-hand yaw + the yaw action and zdown = the extra descent used."""
+    import numpy as np
+    prefix = Path(prefix); prefix.parent.mkdir(parents=True, exist_ok=True)
+    kw = dict(env_kw, basket_xy_mm=0, basket_yaw_deg=0, pitch_frac=0, lean_deg=0)
+    out = []
+    for method in ('p', 'policy'):
+        env = DockEnv(episodes, seed=seed, **kw)
+        obs = env.reset()
+        res = torch.zeros(episodes, env.path_steps, 4, device='cuda')
+        ids = torch.arange(episodes, device='cuda')
+        for _ in range(env.steps - 1):
+            obs, _, _, info = env.step(net.deterministic(obs) if method == 'policy' else controller(obs, 'p'))
+            r = torch.zeros(episodes, 4, device='cuda')
+            r[:, :3] = env.residual[:, :3]
+            r[:, 3] = env.yaw0 + (env.residual[:, 3] if env.act_dim > 3 else 0)
+            res[ids, env.t] = r
+        path = prefix.with_name(prefix.name + f'_{method}.npz')
+        np.savez_compressed(path, method=method, seed=seed, job=env.job.cpu().numpy(), H=env.H.cpu().numpy(),
+                            residual=res.cpu().numpy(), zdown=env.zdown.cpu().numpy(),
+                            kin_success=info['success'].cpu().numpy(), kin_fit=info['fit'].cpu().numpy(),
+                            names=np.array([f'Q3_job_{i}' for i in range(len(env.paths))]), env_kwargs=json.dumps(kw))
+        out.append(dict(path=str(path), kin_success=float(info['success'].float().mean()),
+                        pc_success=float((info['success'] & (info['fit'] >= 0.8)).float().mean())))
+    return out
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('--out', default='outputs/dock_rl_20261030/pc_curr_v1')
@@ -122,6 +151,7 @@ def main():
     p.add_argument('--eval_every', type=int, default=5); p.add_argument('--seed', type=int, default=0)
     p.add_argument('--init', default='')
     p.add_argument('--start_stage', type=int, default=0)
+    p.add_argument('--export_physics', default='', help='with --init: only write the P/policy bundles to this prefix and exit')
     a = p.parse_args()
     assert len(a.tols) == len(a.p_weights)
     gates = a.advance * len(a.tols) if len(a.advance) == 1 else a.advance
@@ -137,6 +167,9 @@ def main():
     if a.init:
         net.load_state_dict(torch.load(a.init, map_location='cuda', weights_only=True))
     net.w.fill_(a.p_weights[stage])
+    if a.export_physics:
+        print(json.dumps(export_physics(net, kw, a.export_physics), indent=1))
+        return
     opt = torch.optim.Adam(net.parameters(), lr=a.lr)
     base = evaluate(None, kw, a.fit_ok)
     log = lambda rec: (print(json.dumps(rec), flush=True),  # noqa: E731

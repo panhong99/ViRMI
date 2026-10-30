@@ -195,10 +195,12 @@ def main():
             else:
                 old = np.linspace(0, 1, dock_residual.shape[1])
                 new = np.linspace(0, 1, len(F))
-                rr = np.stack([np.interp(new, old, dock_residual[e, :, k]) for k in range(3)], 1)
+                rr = np.stack([np.interp(new, old, dock_residual[e, :, k]) for k in range(dock_residual.shape[2])], 1)
                 centre_path[:, :3, 3] += (Tbb[:3, :3] @ np.c_[rr[:, :2], np.zeros(len(rr))].T).T
                 for k in range(len(centre_path)):
                     centre_path[k, :3, :3] = R.from_rotvec(Tbb[:3, 1] * rr[k, 2]).as_matrix() @ centre_path[k, :3, :3]
+                    if rr.shape[1] > 3:      # (Claude 10/30, dock_pc_train bundles) yaw about the basket vertical at the centre
+                        centre_path[k, :3, :3] = R.from_rotvec(Tbb[:3, 2] * rr[k, 3]).as_matrix() @ centre_path[k, :3, :3]
             if dock_zoff is not None:                              # whole path raised: release that high (drop into the slot)
                 centre_path[:, :3, 3] += float(dock_zoff[e]) * Tbb[:3, 2]
             if n_extra[e]:

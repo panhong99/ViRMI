@@ -561,6 +561,8 @@ def main():
                                     '7 N (overrides --pre, --mode, --force, --grasp_recipe)')
     p.add_argument('--grasp_recipe', type=int, help='DGManager grasp recipe: mode, position mode, smooth (not its force)')
     p.add_argument('--lock', action='store_true', help='after the grasp, hold the grasping fingers in position mode')
+    p.add_argument('--lock_squeeze', type=float, default=8.0, help='--lock: target this many deg past the stopped angles in the '
+                   'closing direction (the soft position gains squeeze with the error; 0 = the old --lock, plate slipped)')
     p.add_argument('--basket_json', default='', help='use this basket_vision.json instead of measuring the basket now')
     p.add_argument('--fixed_basket', action='store_true', help='(old) the fixed 11/3 basket file + the 10/27 by-eye shifts')
     p.add_argument('--sim_corr', default='', help='(opt-in, plate) learned insert correction json from rl/hand_basket.py cem '
@@ -801,9 +803,15 @@ def main():
         except RuntimeError:
             pass
         if a.lock:
-            ask('2b. lock the grasping fingers at their current angles (position mode).')
-            # target = the measured angles first, so the switch to position mode has nothing to move to
-            check('hold target', g.move_joint_all(list(g.get_gripper_data().joint[:JOINTS])))
+            # (보스 10/30 real: --lock let the plate go) the position gains are soft (P 3): a target AT the measured angles
+            # squeezes with ~0.  Target = the measured angles + --lock_squeeze deg further in the closing direction (from
+            # the pre-pose to where the grasp stopped) on the joints that closed > 2 deg; held joints stay
+            now = [float(v) for v in g.get_gripper_data().joint[:JOINTS]]
+            tgt = [v + (a.lock_squeeze * (1 if v > p_ else -1) if not hold[j] and abs(v - p_) > 2.0 else 0.0)
+                   for j, (v, p_) in enumerate(zip(now, pre))]
+            ask(f'2b. lock: position mode, the closing joints {a.lock_squeeze:g} deg past where they stopped '
+                f'({[j + 1 for j in range(JOINTS) if tgt[j] != now[j]]}).')
+            check('hold target', g.move_joint_all(tgt))
             for f in range(1, 6):
                 check(f'position mode finger {f}', g.set_position_mode_finger([1] * 4, f))
             for _ in range(3):

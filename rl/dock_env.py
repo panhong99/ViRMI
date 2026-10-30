@@ -51,7 +51,7 @@ class DockEnv:
                  basket_yaw_deg=1.0, pitch_frac=0.05, lean_deg=3.0, descend_extra_mm=0.0,
                  residual_xy_mm=80.0, residual_pitch_deg=15.0, hover_until=None, hover_max=120, hover_step_mm=2.0,
                  hover_tilt_deg=None, target_x_mm=0.0, lean_follow=0.0,
-                 depth_obs=False, freeze_in_tines=False, pc_goal=False, pc_points=32, pc_tol_mm=5.0, pc_yaw=False, yaw_deg=0.0):
+                 depth_obs=False, freeze_in_tines=False, pc_goal=False, pc_points=32, pc_tol_mm=5.0, pc_yaw=False, yaw_deg=0.0, pc_disc_dist=False):
         self.device = torch.device(device)
         self.n, self.path_steps, self.hover_steps = int(num_envs), int(steps), int(hover_steps)
         # (Claude 10/29 3rd review, opt-in) after the taught end keep going down 2 mm a step until floor contact,
@@ -76,6 +76,7 @@ class DockEnv:
         self.pc_goal, self.pc_m = bool(pc_goal), int(pc_points)
         if self.pc_goal:
             self.obs_dim = 9 + 6 * self.pc_m
+        self.pc_disc_dist = bool(pc_disc_dist)
         self.pc_tol = float(pc_tol_mm) / 1000                  # fit-ratio radius (curriculum: wide first, then tighter)
         # (opt-in) in-hand yaw about the basket vertical (real grasps: 14-26 deg) and a 4th action that turns it back
         self.yaw_deg = float(yaw_deg)
@@ -314,9 +315,21 @@ class DockEnv:
         return cur, goal
 
     def pc_fit(self):
-        """-> (fit ratio: plate points within 5 mm of the goal cloud, symmetric Chamfer distance [m])."""
+        """-> (fit ratio: plate points within pc_tol of the goal, mean distance [m]).  With pc_disc_dist the distance is
+        each plate point to the goal DISC (plane offset + radial overshoot): exact, and blind to the spin about the
+        face normal; otherwise the point-to-point Chamfer of the 32-point sets, which has a ~10 mm floor even at the
+        exact pose (rim points 52 mm apart, the spin is arbitrary; Codex 10/30 review, Claude oracle check)."""
         P, _, _, _, root_x, yc, _ = self._geometry()
         cur, goal = self._clouds(P, root_x, yc)
+        if self.pc_disc_dist:
+            c = goal.mean(1, keepdim=True)
+            n = torch.linalg.cross(goal[:, 0] - c[:, 0], goal[:, 4] - c[:, 0])
+            n = (n / torch.linalg.vector_norm(n, dim=1, keepdim=True).clamp_min(1e-9))[:, None]
+            d = cur - c
+            h = (d * n).sum(2)
+            r = torch.linalg.vector_norm(d - h[..., None] * n, dim=2)
+            a = torch.sqrt(h.square() + (r - self.plate_r).clamp_min(0).square())
+            return (a < self.pc_tol).float().mean(1), a.mean(1)
         D = torch.cdist(cur, goal)
         a, b = D.min(2).values, D.min(1).values
         return (a < self.pc_tol).float().mean(1), (a.mean(1) + b.mean(1)) / 2

@@ -101,7 +101,10 @@ def main():
     p.add_argument('--tols', type=float, nargs='+', default=[15, 12, 10, 8, 6, 5])
     p.add_argument('--p_weights', type=float, nargs='+', default=[1.0, 0.8, 0.6, 0.4, 0.2, 0.0])
     p.add_argument('--fit_ok', type=float, default=0.8)
-    p.add_argument('--advance', type=float, default=0.5, help='pc_success to move to the next stage')
+    p.add_argument('--advance', type=float, nargs='+', default=[0.5],
+                   help='pc_success to move on, one for all stages or one per stage (~2/3 of the oracle bound at that radius)')
+    p.add_argument('--eval_episodes', type=int, default=1024)
+    p.add_argument('--disc_dist', action='store_true', help='exact point-to-goal-disc distance instead of the 32-point Chamfer')
     p.add_argument('--patience', type=int, default=2)
     p.add_argument('--max_updates', type=int, default=1500)
     p.add_argument('--yaw', action='store_true', help='in-hand yaw +/- --yaw_deg and a yaw action')
@@ -121,12 +124,14 @@ def main():
     p.add_argument('--start_stage', type=int, default=0)
     a = p.parse_args()
     assert len(a.tols) == len(a.p_weights)
+    gates = a.advance * len(a.tols) if len(a.advance) == 1 else a.advance
+    assert len(gates) == len(a.tols)
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
     (out / 'args.json').write_text(json.dumps(vars(a), indent=1))
     stage = a.start_stage
     kw = dict(pc_goal=True, pc_tol_mm=a.tols[stage], pc_yaw=a.yaw, yaw_deg=a.yaw_deg if a.yaw else 0.0,
               descend_extra_mm=a.descend_extra_mm, residual_pitch_deg=a.residual_pitch_deg,
-              hover_until=a.hover_until if a.hover_until > 0 else None)
+              hover_until=a.hover_until if a.hover_until > 0 else None, pc_disc_dist=a.disc_dist)
     env = DockEnv(a.envs, seed=a.seed, **kw)
     net = PointNetAC(env.pc_m, env.act_dim).cuda()
     if a.init:
@@ -175,11 +180,11 @@ def main():
                 opt.zero_grad(); loss.backward(); nn.utils.clip_grad_norm_(net.parameters(), 0.5); opt.step()
         if update % a.eval_every:
             continue
-        ev = evaluate(net, kw, a.fit_ok, seed=10000 + update)
+        ev = evaluate(net, kw, a.fit_ok, episodes=a.eval_episodes, seed=10000 + update)
         log(dict(update=update, stage=stage, tol_mm=a.tols[stage], w=a.p_weights[stage], **ev, reward=float(R.sum(0).mean()),
                  gpu_peak_gb=round(torch.cuda.max_memory_allocated() / 2**30, 2), time=time.strftime('%m-%d %H:%M')))
         torch.save(net.state_dict(), out / 'last.pt')
-        streak = streak + 1 if ev['pc_success'] >= a.advance else 0
+        streak = streak + 1 if ev['pc_success'] >= gates[stage] else 0
         if ev['pc_success'] > best:
             best, best_at = ev['pc_success'], update
             torch.save(net.state_dict(), out / f'stage{stage}_best.pt')
@@ -196,6 +201,8 @@ def main():
         stage += 1; streak, best, best_at = 0, -1.0, update
         kw['pc_tol_mm'] = a.tols[stage]; env.pc_tol = a.tols[stage] / 1000
         net.w.fill_(a.p_weights[stage])
+        log(dict(event='stage_start', stage=stage, tol_mm=a.tols[stage], w=a.p_weights[stage], gate=gates[stage],
+                 p_controller=evaluate(None, kw, a.fit_ok, episodes=a.eval_episodes), time=time.strftime('%m-%d %H:%M')))
     torch.save(net.state_dict(), out / 'final.pt')
     final = {k: evaluate(net, dict(kw, pc_tol_mm=t), a.fit_ok, seed=777) for k, t in (('tol_final', a.tols[stage]), ('tol_5mm', 5.0))}
     log(dict(event='end', stage=stage, final=final, p_controller_5mm=evaluate(None, dict(kw, pc_tol_mm=5.0), a.fit_ok, seed=777),

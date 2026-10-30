@@ -5773,3 +5773,12 @@ DockEnv opt-in을 더 넣어 P를 Isaac으로 쟀다(seed 51024, 1024개, 바구
 - stage 0 (30 mm, P weight 1.0, `stage0.pt`): P pc_success **28.76% [27.39, 30.17]**, 정책 **47.24% [45.72, 48.77]**; strict success 67.11→85.64%, median Chamfer 26.70→22.02 mm. 독립 평가에서도 45% gate를 넘고 Wilson CI가 P와 겹치지 않는다.
 - stage 1 (25 mm, P weight 0.85, `stage1.pt`): P **18.97% [17.80, 20.20]**, 정책 **44.46% [42.94, 45.98]**; strict 65.89→83.96%, Chamfer 26.60→18.53 mm. 학습 중 1024 표본 두 번은 46.3/46.2%로 stage를 넘었지만 독립 4096은 **45% gate보다 0.54%p 낮다**. 따라서 stage 1 통과는 경계 결과이며 확정 통과로 주장하지 않는다.
 - 결과: `outputs/dock_rl_20261030/pc_codex_eval/stage0_seed24030_n4096.json`, `stage1_seed24031_n4096.json`. 출력은 data라 git에 넣지 않았다. 학습 PID 2135909는 그대로 두었고 다른 GPU 계산, 실로봇·핸드·카메라·ROS는 실행하지 않았다.
+
+## 2026-10-30 18:3x Claude — 점군 목표 도킹 RL v3: 운동학 + Isaac 물리
+- 보스 지시(15:00): 꽂힌 접시 GT 점군에 맞추는 방식으로 P 제어기를 RL로 점진적으로 걷어냄, 처음엔 여유 있게.
+- 구현: `rl/dock_env.py --pc_goal`(목표 = 칸 뿌리 바닥 + 빗살 기울기 면 원판 32점, `--disc_dist` = 점→목표 원판 거리), `rl/dock_pc_train.py`(PointNet PPO, 행동 = w·P + s·정책, w 1→0, 반경 30→5 mm, 단계 기준 = 정답 제어기 상한의 2/3). GPU 1.0 GB.
+- 수정 이력: v1 기본 env는 정답 제어기도 pc 26–41 % → opt-in(추가 하강 40 mm, pitch 25°, hover 0.15) 켬(v2). v2 20 mm 정체 → 32점 Chamfer에 정확한 자세에서도 10 mm 바닥(Codex 축대칭 지적) → `--disc_dist`(v3).
+- v3 운동학(5 mm, P 0, seed 777, n 1024): 성공 88.4 % (P 69.8), pc 24.4 % [21.9, 27.1] (P 0.0, 정답 제어기 28), 거리 9.3 mm (P 19.7).
+- **Isaac 물리 재생**(seed 51024, 바구니 고정, n 1024, `hand_basket.py --dock_traj`, yaw 4열 opt-in): **정책 368/1024 = 35.9 % [33.0, 38.9]**, P 189/1024 = 18.5 % [16.2, 21.0]. 구간 안 겹침. loose 84 vs 91. 실패는 대부분 옆 칸(목표−1) 착지, 핀별 x 오차 중앙 −22 mm.
+- 결과: `outputs/dock_rl_20261030/pc_curr_v3/`, `pc_physics_v3/isaac_{p,policy}.{json,log}`.
+- 다음: (1) 물리 안착 오프셋(Codex: x −15.8 mm, pitch +3.8°)을 목표에 넣은 v4(`target_x_mm`) — 옆 칸 착지 줄이는지. (2) 물리 성공을 보상에 반영하는 방법은 그 뒤.

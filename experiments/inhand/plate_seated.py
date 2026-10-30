@@ -1,8 +1,8 @@
 """(보스 10/30) the target: a plate 보스 seated by hand in a slot, measured by the same fixed D455 as plate_inhand.py
 (so the camera's own pose error is in both).  Read-only.
     ~/miniconda3/envs/foundationpose/bin/python experiments/inhand/plate_seated.py --quadrant Q3 --pin 6
-Plate = the largest plane of the depth points within 0.25 m of where a seated plate's centre would be (the gap, 13 cm
-up), 3 cm over the basket floor (not the floor / cloth); centre = the 13.5 cm circle as in plate_inhand.  Prints the
+Plate = the largest plane of the depth points in a box at the slot (gap x +-8 cm, its y +-15 cm, 3..32 cm over the
+floor: not the floor, cloth or basket wall); centre = the 13.5 cm circle as in plate_inhand.  Prints the
 plate in the basket frame: lowest rim vs the floor (0 if the camera were exact), its x vs the gap, tilt and yaw; saves
 outputs/inhand_20261030/seated_<Q>_<pin>_<time>.json (+ frame)."""
 import argparse
@@ -41,7 +41,8 @@ def main():
     guess = (Tbb @ np.r_[g[0], g[1], floor + 0.13, 1.0])[:3]
     X, UV = PI.cloud(depth, K, Tbc, step=1)
     Xb = X @ Tkb[:3, :3].T + Tkb[:3, 3]
-    keep = Xb[:, 2] > floor + 0.03
+    keep = ((Xb[:, 2] > floor + 0.03) & (Xb[:, 2] < floor + 0.32) & (np.abs(Xb[:, 0] - g[0]) < 0.08)   # (10/30: the basket
+            & (np.abs(Xb[:, 1] - g[1]) < 0.15))                                                # wall won) the slot box
     r = PI.plate_plane(X, guess, np.random.default_rng(0), keep=keep)
     if r is None:
         sys.exit('no depth points at the slot')

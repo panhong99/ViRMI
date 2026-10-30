@@ -68,6 +68,10 @@ def main():
     p.add_argument('--knot_deg', type=float, default=5.0, help='--smooth: joint step between knots [deg]')
     p.add_argument('--wrist_less', type=float, default=25.0, help='turn the hand this much less (grasp -> insert) than taught, '
                    'about the held plate\'s lowest point [deg] (보스 10/29: 25 less is enough for the slot; 0 = as taught)')
+    p.add_argument('--pivot', choices=('model', 'slot'), default='model', help='(보스 10/30, opt-in slot) --wrist_less pivot: '
+                   'model = the planner model plate\'s lowest point (179 mm off the real plate bottom: the 25 deg turn moved '
+                   'the plate 69 mm along the row, 4 gaps - the L1 / L2 landings); slot = where the plate bottom was at the '
+                   'teaching (the taught gap on the floor), carried with the flange')
     a = p.parse_args()
     e = json.loads(TAUGHT.read_text())[a.index]
     pts = e['waypoints_deg']
@@ -117,6 +121,11 @@ def main():
         from scipy.optimize import least_squares
         from scipy.spatial.transform import Rotation
         cloud = pp.plate_cloud(np.asarray(e['plate_in_tcp'], float), np.eye(4))
+        if a.pivot == 'slot':                                    # the plate bottom at the teaching, in the flange frame
+            mq_t = pp.robot_quadrants(Tt)[e['quadrant']]
+            g_t = pp.basket_gaps()[mq_t][pp.pin_gap(Tt, mq_t, e['pin'])]
+            F_t = k.fk(np.radians(e['waypoints_deg'][-1]))
+            p_slot = (np.linalg.inv(F_t) @ Tt @ np.r_[g_t[0], g_t[1], g_t[2], 1.0])[:3]
         q3 = np.radians(pts[-1])
         d = q3.copy()
         d[4] -= np.radians(1.0)
@@ -126,9 +135,13 @@ def main():
         for i_q, q in enumerate(pts):
             q0 = np.radians(q)
             F = k.fk(q0)
-            low = cloud @ F[:3, :3].T + F[:3, 3]
-            piv = low[np.argmin(low[:, 2])]
-            p_f = F[:3, :3].T @ (piv - F[:3, 3])                 # the pivot in the flange frame
+            if a.pivot == 'slot':
+                p_f = p_slot
+                piv = F[:3, :3] @ p_f + F[:3, 3]
+            else:
+                low = cloud @ F[:3, :3].T + F[:3, 3]
+                piv = low[np.argmin(low[:, 2])]
+                p_f = F[:3, :3].T @ (piv - F[:3, 3])             # the pivot in the flange frame
             Rt = Rb @ F[:3, :3]
 
             def res(x, q0=q0, p_f=p_f, piv=piv, Rt=Rt):

@@ -111,9 +111,10 @@ def circle_centre(Q, c, n):
     return c + m[0] * a + m[1] * b, float(np.median(np.abs(np.linalg.norm(hull - m, axis=1) - R_PLATE)))
 
 
-def slot_pose(quadrant, pin):
+def slot_pose(quadrant, pin, pivot='model'):
     out = subprocess.run([str(PLAN_PY), str(ROOT / 'tesollo/taught_plan.py'), '--index', '0', '--quadrant', quadrant,
-                          '--pin', str(pin), '--rise', '0.30', '--wrist_less', '25', '--smooth', '--basket', str(BASKET)],
+                          '--pin', str(pin), '--rise', '0.30', '--wrist_less', '25', '--smooth', '--basket', str(BASKET),
+                          '--pivot', pivot],
                          capture_output=True, text=True, cwd=str(ROOT))
     m = re.search(r'^plan: (\S+)', out.stdout, re.M)
     if not m:
@@ -127,6 +128,7 @@ def main():
     a.add_argument('--pin', type=int, default=6)
     a.add_argument('--joints', type=float, nargs=6, help='instead of reading the robot (offline check)')
     a.add_argument('--frame', default='', help='a saved .npz (rgb, depth, K) instead of the camera')
+    a.add_argument('--pivot', choices=('model', 'slot'), default='model', help='taught_plan.py --pivot of the run')
     a.add_argument('--new_frame', action='store_true', help='a shared frame taken after the call (dg5fs_sdk --inhand_check)')
     a = a.parse_args()
     import calib_core as cc
@@ -161,7 +163,7 @@ def main():
     # plate in the flange, then at the taught slot pose of the target
     n_f, c_f = F[:3, :3].T @ n, np.linalg.inv(F) @ np.r_[centre, 1.0]
     Tbb = np.array(json.loads(BASKET.read_text())['T'])
-    Fs = k.fk(np.radians(slot_pose(a.quadrant, a.pin)))
+    Fs = k.fk(np.radians(slot_pose(a.quadrant, a.pin, a.pivot)))
     Tkb = np.linalg.inv(Tbb)
     nb = Tkb[:3, :3] @ Fs[:3, :3] @ n_f
     nb *= np.sign(nb[0]) if nb[0] else 1.0

@@ -149,6 +149,7 @@ GRIPPER = [False, None]     # (--gripper_path [--wrist d4 d5 d6], 보스 10/29) 
 INSERT_VEL = [40.0]         # (보스 10/29) deg/s for the taught insert (1 cm over the slot -> in), --insert_vel
 AUTO = [True]               # (보스 10/29) no Enter between the steps: seen -> approach -> grasp -> basket -> release -> home
 TAUGHT_IX = [None]          # (--taught [N], 보스 10/29) plate: basket = the taught insert N of taught_inserts.json
+TAUGHT_PIVOT = ['model']    # (--taught_pivot, 보스 10/30) taught_plan.py --pivot: slot = turn the wrist about the real plate bottom
 INHAND = [False]            # (--inhand_check, 보스 10/30) plate: stop at the lift top, fixed camera measures the plate in the hand
 TEACH = [False]             # (--teach, 보스 10/29) plate: the plan stops above the basket, the insert is taught by the pendant
 CONTACT = REPO / 'tesollo/grasp_contact.json'   # finger joints at the end of the last grasp per object (the pre-close target)
@@ -269,7 +270,8 @@ def plan_cmd(obj, quadrant, pin, centre_h=None):
     if TAUGHT_IX[0] is not None and obj == 'plate':      # (보스 10/29) the pendant-taught insert, one sparse spline after
         return ([str(PLAN_PY), str(REPO / 'tesollo/taught_plan.py'), '--index', str(TAUGHT_IX[0]),    # the grasp
                  '--quadrant', quadrant, '--pin', str(pin), '--dx', str(SHIFT[0]), '--dy', str(SHIFT[1]),
-                 '--rise', str(LIFT_M[0]), '--wrist_less', str(TAUGHT_LESS[0])] + (['--smooth'] if SMOOTH[0] else [])
+                 '--rise', str(LIFT_M[0]), '--wrist_less', str(TAUGHT_LESS[0]), '--pivot', TAUGHT_PIVOT[0]]
+                + (['--smooth'] if SMOOTH[0] else [])
                 + (['--basket', BASKET_JSON[0]] if BASKET_JSON[0] else []))
     return ([str(PLAN_PY), str(REPO / 'tesollo/basket_plan.py'), '--object', obj, '--quadrant', quadrant,
              '--pin', str(pin), '--dx', str(SHIFT[0]), '--dy', str(SHIFT[1])]
@@ -364,7 +366,7 @@ def inhand_measure(quadrant, pin, q_top):
     """experiments/inhand/plate_inhand.py on a frame taken after the stop (read-only); never stops the run."""
     try:
         r = subprocess.run([str(PLAN_PY), str(REPO / 'experiments/inhand/plate_inhand.py'), '--quadrant', quadrant,
-                            '--pin', str(pin), '--new_frame', '--joints'] + [str(v) for v in q_top],
+                            '--pin', str(pin), '--new_frame', '--pivot', TAUGHT_PIVOT[0], '--joints'] + [str(v) for v in q_top],
                            capture_output=True, text=True, timeout=30, cwd=str(REPO))
         print('   in-hand check: ' + ((r.stdout.strip().splitlines() or ['(no output)'])[-1] if not r.returncode
                                        else f'failed ({(r.stdout + r.stderr).strip()[-200:]})'), flush=True)
@@ -556,6 +558,8 @@ def main():
                    'leaned back than taught, plate bottom kept on the slot [deg] (보스 10/29: 25; 0 = as taught)')
     p.add_argument('--open_first', action='store_true', help='(old) open the hand in the basket before the arm goes home '
                    '(default: release, arm home, then open - 보스 10/29)')
+    p.add_argument('--taught_pivot', choices=('model', 'slot'), default='model', help='(보스 10/30, opt-in slot) the taught '
+                   'insert\'s wrist turn about the real plate bottom at the teaching (model: 4 gaps off at pin 6, the L1 / L2 landings)')
     p.add_argument('--inhand_check', action='store_true', help='(보스 10/30, opt-in) plate: stop at the lift top, the fixed '
                    'camera measures the plate in the hand (experiments/inhand/plate_inhand.py, read-only), then go on')
     p.add_argument('--stepwise', action='store_true', help='(old) post-grasp legs as before: plate stops 1 cm over the slot '
@@ -569,6 +573,7 @@ def main():
     LIFT_M[0], TAUGHT_LESS[0], BOWL_LIFT[0] = a.lift, a.taught_wrist_less, a.bowl_lift
     SMOOTH[0], ACC[0] = not a.stepwise, 1.0 if a.stepwise else a.acc_ratio
     INHAND[0] = a.inhand_check
+    TAUGHT_PIVOT[0] = a.taught_pivot
     ARM_APPROACH[:] = ['above', 'down'] if a.approach_stop else ARM_APPROACH
     TEACH[0] = a.teach
     INSERT_VEL[0] = a.insert_vel

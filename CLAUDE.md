@@ -9,7 +9,7 @@ Claude와 Codex가 human-in-the-loop 방식으로 context를 공유한다. 공�
 
 ## 작업 시작 시
 
-1. `collab/WORK_RULES.md`(업무 지침서), `collab/CONTEXT.md`, `collab/DECISIONS.md`, `collab/LOG.md` 최근 항목, `collab/HUMAN_NOTES.md`를 먼저 읽는다.
+1. `collab/STATE_NOW.md`(지금 상태·인수인계, 가장 먼저), `collab/WORK_RULES.md`(업무 지침서), `collab/CONTEXT.md`, `collab/DECISIONS.md`, `collab/LOG.md` 최근 항목, `collab/HUMAN_NOTES.md`를 먼저 읽는다.
 2. `collab/HUMAN_NOTES.md`의 미반영 의견을 우선 처리한다.
 
 ## 작업/토론 종료 시

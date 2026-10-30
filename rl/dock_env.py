@@ -52,7 +52,7 @@ class DockEnv:
                  residual_xy_mm=80.0, residual_pitch_deg=15.0, hover_until=None, hover_max=120, hover_step_mm=2.0,
                  hover_tilt_deg=None, target_x_mm=0.0, lean_follow=0.0,
                  depth_obs=False, freeze_in_tines=False, pc_goal=False, pc_points=32, pc_tol_mm=5.0, pc_yaw=False, yaw_deg=0.0, pc_disc_dist=False,
-                 phys_critic=None, phys_w=12.0):
+                 phys_critic=None, phys_w=12.0, angle_tol_deg=20.0):
         self.device = torch.device(device)
         self.n, self.path_steps, self.hover_steps = int(num_envs), int(steps), int(hover_steps)
         # (Claude 10/29 3rd review, opt-in) after the taught end keep going down 2 mm a step until floor contact,
@@ -78,6 +78,9 @@ class DockEnv:
         if self.pc_goal:
             self.obs_dim = 9 + 6 * self.pc_m
         self.pc_disc_dist = bool(pc_disc_dist)
+        # (Claude 10/30 Isaac v4 failures: face 19.9 +/- 8.4 deg vs successes 11.6 +/- 3.7, tine lean ~11) the strict
+        # angle window; 20 lets plates that topple in physics count as seated
+        self.angle_tol = math.radians(float(angle_tol_deg))
         # (Claude 10/30, opt-in) a learned physics-success model (rl/phys_critic.py, trained on Isaac replays) scores
         # each episode's kinematic end state; terminal reward += phys_w * P(physics success)
         self.phys_critic, self.phys_w = None, float(phys_w)
@@ -451,7 +454,7 @@ class DockEnv:
         x_ok = (bottom_b[:, 0] - root_x).abs() < 0.0085
         y_ok = (bottom_b[:, 1] - yc).abs() < 0.030
         height_ok = (bottom_b[:, 2] - self.floor_z) <= 0.002
-        angle_ok = angle < math.radians(20)
+        angle_ok = angle < self.angle_tol
         return x_ok, y_ok, height_ok, angle_ok, angle
 
 

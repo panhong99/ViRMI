@@ -118,6 +118,13 @@ def export_physics(net, env_kw, prefix, episodes=1024, seed=51024):
             r = torch.zeros(episodes, 4, device='cuda')
             r[:, :3] = env.residual[:, :3]
             r[:, 3] = env.yaw0 + (env.residual[:, 3] if env.act_dim > 3 else 0)
+            if env.lean_follow:                              # the slot-face descent shift DockEnv adds inside _plate_pose_at
+                lf, env.lean_follow = env.lean_follow, 0.0
+                b0, _ = env._bottom(env._plate_pose())
+                env.lean_follow = lf
+                h = ((env.Tbb[:, :3, :3].transpose(1, 2) @ (b0 - env.Tbb[:, :3, 3])[..., None]).squeeze(-1)[:, 2]
+                     - env.floor_z).clamp(0, 0.10)
+                r[:, 0] += env.lean_follow * math.sin(env.lean0) * h
             res[ids, env.t] = r
         path = prefix.with_name(prefix.name + f'_{method}.npz')
         np.savez_compressed(path, method=method, seed=seed, job=env.job.cpu().numpy(), H=env.H.cpu().numpy(),
@@ -151,6 +158,8 @@ def main():
     p.add_argument('--residual_pitch_deg', type=float, default=25.0)
     p.add_argument('--hover_until', type=float, default=0.15)
     p.add_argument('--target_x_mm', type=float, default=0.0, help='goal/seat x offset from the gap root (basket x)')
+    p.add_argument('--angle_tol_deg', type=float, default=20.0, help='strict-success face angle window (physics: ~6)')
+    p.add_argument('--lean_follow', type=float, default=0.0, help='(opt-in) descend along the slot face in the tines')
     p.add_argument('--phys_critic', default='', help='(opt-in) rl/phys_critic.py model: terminal reward += phys_w * P(physics)')
     p.add_argument('--phys_w', type=float, default=12.0)
     p.add_argument('--plateau', type=int, default=0, help='also move on after this many updates without a new best (0: never)')
@@ -172,7 +181,8 @@ def main():
     kw = dict(pc_goal=True, pc_tol_mm=a.tols[stage], pc_yaw=a.yaw, yaw_deg=a.yaw_deg if a.yaw else 0.0,
               descend_extra_mm=a.descend_extra_mm, residual_pitch_deg=a.residual_pitch_deg,
               hover_until=a.hover_until if a.hover_until > 0 else None, pc_disc_dist=a.disc_dist,
-              target_x_mm=a.target_x_mm, phys_critic=a.phys_critic or None, phys_w=a.phys_w)
+              target_x_mm=a.target_x_mm, phys_critic=a.phys_critic or None, phys_w=a.phys_w,
+              lean_follow=a.lean_follow, angle_tol_deg=a.angle_tol_deg)
     env = DockEnv(a.envs, seed=a.seed, **kw)
     net = PointNetAC(env.pc_m, env.act_dim).cuda()
     if a.init:

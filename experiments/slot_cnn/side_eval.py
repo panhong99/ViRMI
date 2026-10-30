@@ -24,21 +24,22 @@ from train import TineNet  # noqa: E402
 def row_filter(P, n_max=13, tol=4.0):
     """Keep tips that sit on one of two image lines AND on that row's even tine spacing (clip / frame / wheel false tips
     at the row ends break the spacing).  P (n, 2) full-frame px -> kept indices."""
-    rng = np.random.default_rng(0)
     left, keep = np.arange(len(P)), []
     for _ in range(2):
         if len(left) < 4:
             break
-        best = None
-        for _ in range(1500):
-            i, j = rng.choice(left, 2, replace=False)
-            if abs(P[i, 0] - P[j, 0]) < 20:
-                continue
-            a = (P[j, 1] - P[i, 1]) / (P[j, 0] - P[i, 0])
-            b = P[i, 1] - a * P[i, 0]
-            inl = left[np.abs(P[left, 1] - (a * P[left, 0] + b)) < tol]
-            if best is None or len(inl) > len(best):
-                best = inl
+        Q = P[left]                                           # (10/30) every point pair at once, not 1500 random draws
+        i, j = np.triu_indices(len(Q), 1)                     # (26 ms -> ~1 ms a quadrant; same best line, ties -> least residual)
+        m = np.abs(Q[j, 0] - Q[i, 0]) >= 20
+        if not m.any():
+            break
+        i, j = i[m], j[m]
+        a = (Q[j, 1] - Q[i, 1]) / (Q[j, 0] - Q[i, 0])
+        b = Q[i, 1] - a * Q[i, 0]
+        r = np.abs(Q[None, :, 1] - (a[:, None] * Q[None, :, 0] + b[:, None]))
+        inl = r < tol
+        k = np.lexsort((np.where(inl, r, 0).sum(1), -inl.sum(1)))[0]
+        best = left[inl[k]]
         row = best[np.argsort(P[best, 0])]
         if len(row) >= 4:
             gaps = np.diff(P[row, 0])

@@ -178,6 +178,7 @@ def main():
     p.add_argument('--init', default='')
     p.add_argument('--start_stage', type=int, default=0)
     p.add_argument('--export_physics', default='', help='with --init: only write the P/policy bundles to this prefix and exit')
+    p.add_argument('--export_seed', type=int, default=51024)
     a = p.parse_args()
     assert len(a.tols) == len(a.p_weights)
     gates = a.advance * len(a.tols) if len(a.advance) == 1 else a.advance
@@ -205,7 +206,7 @@ def main():
         net.load_state_dict(sd)
     net.w.fill_(a.p_weights[stage])
     if a.export_physics:
-        print(json.dumps(export_physics(net, kw, a.export_physics), indent=1))
+        print(json.dumps(export_physics(net, kw, a.export_physics, seed=a.export_seed), indent=1))
         return
     opt = torch.optim.Adam(net.parameters(), lr=a.lr)
     base = evaluate(None, kw, a.fit_ok)

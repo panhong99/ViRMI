@@ -44,3 +44,9 @@
 ## 5. 협업
 - 티와리(Codex)는 TASKBOARD 할 일, 서로 커밋 검토. 보스는 결과·승인만 받는다.
 - 보스 확인이 필요한 건 "보스 확인 필요:" 줄로.
+
+## 6. 점군 목표 도킹 RL (10/30 15:00– 주말, 보스 지시: GT 점군에 맞추며 P 제어기를 RL로 점진 제거)
+- 코드: `rl/dock_env.py`(opt-in `pc_goal, pc_disc_dist, pc_yaw, angle_tol_deg, speed_action, phys_critic, freeze_in_tines`), `rl/dock_pc_train.py`(PointNet PPO, P 가중치·반경 커리큘럼, `--export_physics`), `rl/dock_pc_view.py`(GUI), `rl/phys_critic.py`(실험, 버그 데이터로 학습돼 보류).
+- 현재 최고 **v7** `outputs/dock_rl_20261030/pc_p40_v7/final.pt`: Isaac 물리 77.4 % / 81.1 %(seed 51024/61024) vs P 43.9 / 50.6 %. 핵심 = 피치 잔차 한계 40°(가르친 경로가 ~10° 치우침) + 각도 판정 6°(20°는 물리에서 넘어지는 접시를 성공으로 셈) + 목표 x +10 mm.
+- 10/30 22:3x 전 물리 수치는 export 버그(바닥 접촉 뒤 knot 잔차 0)로 무효. 상세 LOG 10/30 22:3x.
+- 보스 확인 필요: 실기 손목이 ±40° 피치 보정을 낼 수 있는지(지금 실기 `--wrist_less 25`).

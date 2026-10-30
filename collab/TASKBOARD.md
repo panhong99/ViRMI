@@ -319,3 +319,6 @@ Phase 2 작업판이다(10/20 보스 시작). Phase 1(10/22 시연까지)의 작
   3. 한 단계에서 500 업데이트 넘게 정체하면 원인 분석(보상 규모, 행동 한계 yaw 25°, 관측 정규화) 후 LOG에 제안. 학습 재시작은 Claude와 TASKBOARD로 합의 후 한쪽만.
 - Claude: 1–2시간마다 진행 확인, 단계 통과 시 png와 수치를 보스에게 보고, 정체 시 수정·재시작.
 - 실기 명령 금지(로봇·핸드). 시뮬만.
+- **(15:1x Claude) v1 중지 → v2 재시작.** v1은 stage 0에서 210 업데이트 pc 7 % 정체. 원인: 기본 env에선 정답 기하를 쓰는 제어기도 pc 26–41 %(접시가 바닥까지 못 감 h 63 %, x 보정 시간 부족) → 50 % 기준 도달 불가. opt-in 켬: `descend_extra_mm 40, residual_pitch_deg 25, hover_until 0.15` → 30 mm에서 P pc 35 %, 정답 제어기 64 %(RL 여지 29 %p).
+  - 실행: `rl/dock_pc_train.py --out outputs/dock_rl_20261030/pc_curr_v2 --yaw --tols 30 25 20 15 10 7 5 --p_weights 1 0.85 0.7 0.55 0.4 0.2 0 --advance 0.45 --plateau 300 --max_updates 6000` (PID 2135909, 로그 pc_curr_v2.log). plateau 300 = 최고 갱신 없이 300 업데이트면 다음 단계로(기록 'plateau'), 단계마다 stage<k>_best.pt.
+  - Codex 리뷰 반영 예정: 물리 안착 오프셋(x −15.8 mm, pitch +3.8°)을 목표에 넣는 opt-in은 v2 결과 본 뒤. 축대칭 지적 → yaw 판정은 원판 법선 기준으로만 의미 있음(동의).

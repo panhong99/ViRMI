@@ -106,6 +106,12 @@ def main():
     p.add_argument('--max_updates', type=int, default=1500)
     p.add_argument('--yaw', action='store_true', help='in-hand yaw +/- --yaw_deg and a yaw action')
     p.add_argument('--yaw_deg', type=float, default=10.0)
+    # (Claude 10/30 oracle check) the defaults cap even a true-geometry controller at pc 26-41 %; these opt-ins
+    # (extra descent to the floor, pitch range, hover above the slot) give P 35 % / oracle 64 % at 30 mm
+    p.add_argument('--descend_extra_mm', type=float, default=40.0)
+    p.add_argument('--residual_pitch_deg', type=float, default=25.0)
+    p.add_argument('--hover_until', type=float, default=0.15)
+    p.add_argument('--plateau', type=int, default=0, help='also move on after this many updates without a new best (0: never)')
     p.add_argument('--epochs', type=int, default=3); p.add_argument('--batch', type=int, default=8192)
     p.add_argument('--lr', type=float, default=3e-4); p.add_argument('--gamma', type=float, default=.99)
     p.add_argument('--lam', type=float, default=.95); p.add_argument('--clip', type=float, default=.2)
@@ -118,7 +124,9 @@ def main():
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
     (out / 'args.json').write_text(json.dumps(vars(a), indent=1))
     stage = a.start_stage
-    kw = dict(pc_goal=True, pc_tol_mm=a.tols[stage], pc_yaw=a.yaw, yaw_deg=a.yaw_deg if a.yaw else 0.0)
+    kw = dict(pc_goal=True, pc_tol_mm=a.tols[stage], pc_yaw=a.yaw, yaw_deg=a.yaw_deg if a.yaw else 0.0,
+              descend_extra_mm=a.descend_extra_mm, residual_pitch_deg=a.residual_pitch_deg,
+              hover_until=a.hover_until if a.hover_until > 0 else None)
     env = DockEnv(a.envs, seed=a.seed, **kw)
     net = PointNetAC(env.pc_m, env.act_dim).cuda()
     if a.init:
@@ -130,7 +138,7 @@ def main():
                        open(out / 'progress.jsonl', 'a').write(json.dumps(rec) + '\n'))
     log(dict(event='start', stage=stage, tol_mm=a.tols[stage], w=a.p_weights[stage], p_controller=base, time=time.strftime('%H:%M')))
     torch.cuda.reset_peak_memory_stats()
-    streak = 0
+    streak, best, best_at = 0, -1.0, 0
     for update in range(a.max_updates):
         obs = env.reset()
         O = []; A = []; LP = []; R = []; V = []; D = []
@@ -172,14 +180,20 @@ def main():
                  gpu_peak_gb=round(torch.cuda.max_memory_allocated() / 2**30, 2), time=time.strftime('%m-%d %H:%M')))
         torch.save(net.state_dict(), out / 'last.pt')
         streak = streak + 1 if ev['pc_success'] >= a.advance else 0
-        if streak < a.patience:
+        if ev['pc_success'] > best:
+            best, best_at = ev['pc_success'], update
+            torch.save(net.state_dict(), out / f'stage{stage}_best.pt')
+        stuck = a.plateau and update - best_at >= a.plateau
+        if streak < a.patience and not stuck:
             continue
+        if stuck:
+            log(dict(event='plateau', stage=stage, update=update, best=best, best_at=best_at))
         torch.save(net.state_dict(), out / f'stage{stage}.pt')
         snapshot(net, kw, out / f'stage{stage}.png')
         log(dict(event='stage_passed', stage=stage, update=update, **ev, time=time.strftime('%m-%d %H:%M')))
         if stage == len(a.tols) - 1:
             break
-        stage += 1; streak = 0
+        stage += 1; streak, best, best_at = 0, -1.0, update
         kw['pc_tol_mm'] = a.tols[stage]; env.pc_tol = a.tols[stage] / 1000
         net.w.fill_(a.p_weights[stage])
     torch.save(net.state_dict(), out / 'final.pt')

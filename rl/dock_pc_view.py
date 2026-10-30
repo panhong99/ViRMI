@@ -48,6 +48,10 @@ def main():
         policy = lambda o: controller(o, a.policy)  # noqa: E731
     frames, ok = rollout(policy, a.envs, a.seed)
 
+    import os
+    import matplotlib
+    if 'MPLBACKEND' not in os.environ:                      # the Qt backend needs libxcb-cursor0 on this PC
+        matplotlib.use('TkAgg')
     import matplotlib.pyplot as plt
     from matplotlib.widgets import Slider
     cols = min(a.envs, 4)

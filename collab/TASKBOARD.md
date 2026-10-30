@@ -314,6 +314,7 @@ Phase 2 작업판이다(10/20 보스 시작). Phase 1(10/22 시연까지)의 작
   - GPU 최대 1.0 GB(OOM 없음). 같은 GPU에 다른 학습을 띄우기 전 nvidia-smi 확인.
 - **Codex 할 일**
   1. 커밋 검토: dock_env.py `--pc_goal/pc_tol_mm/pc_yaw/yaw_deg`, dock_pc_train.py. 특히 (a) GT 원판 정의(`_clouds`: 칸 뿌리 바닥 + 빗살 기울기 면)가 criteria()와 맞는지, (b) 원판이 축대칭이라 yaw가 점군에서 보이는지(점군 대응 없음, Chamfer) — 안 보이면 지적.
+     - **1차 검토 완료 (`2f44259`)**: 해석 원판과 운동학 criteria는 일치. 다만 물리 안착 GT(x −15.8 mm, pitch +3.8°)가 아닌 x 0/pitch 0 해석 목표이며, 원판 법선 주위 회전은 축대칭 Chamfer로 관측 불가. 상세 LOG 14:5x.
   2. 독립 평가: 단계 통과 체크포인트마다 seed 다른 4096 에피소드로 P 제어기 대비 성공률·Chamfer(Wilson 95 %) → LOG에 `## 주말 Codex 점군 RL 평가`.
   3. 한 단계에서 500 업데이트 넘게 정체하면 원인 분석(보상 규모, 행동 한계 yaw 25°, 관측 정규화) 후 LOG에 제안. 학습 재시작은 Claude와 TASKBOARD로 합의 후 한쪽만.
 - Claude: 1–2시간마다 진행 확인, 단계 통과 시 png와 수치를 보스에게 보고, 정체 시 수정·재시작.

@@ -66,7 +66,8 @@ def evaluate_policy(net, episodes=1024, seed=1024, **env_kwargs):
 
 def train(a):
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
-    env = DockEnv(a.envs, seed=a.seed)
+    kw = dict(pc_goal=a.pc_goal)
+    env = DockEnv(a.envs, seed=a.seed, **kw)
     net = ActorCritic(env.obs_dim, env.act_dim).cuda()
     opt = torch.optim.Adam(net.parameters(), lr=a.lr)
 
@@ -117,7 +118,7 @@ def train(a):
                 loss=policy+a.vf*value-a.ent*ent
                 opt.zero_grad(); loss.backward(); nn.utils.clip_grad_norm_(net.parameters(),0.5); opt.step()
         if update % a.eval_every == 0 or update == a.updates-1:
-            rate,_=evaluate_policy(net, min(1024,a.envs), seed=10000+update)
+            rate,_=evaluate_policy(net, min(1024,a.envs), seed=10000+update, **kw)
             rec=dict(update=update,samples=(update+1)*a.envs*(env.steps-1),success=rate,
                      reward=float(R.sum(0).mean()),policy=float(policy.detach()),
                      value=float(value.detach()),entropy=float(ent.detach()))
@@ -184,13 +185,14 @@ def export_physics_trajectories(net, prefix, episodes=1024, seed=51024):
     return outputs
 
 
-def report(net, logs, out, episodes=1024, seed=1024):
+def report(net, logs, out, episodes=1024, seed=1024, pc_goal=False):
     out=Path(out); rows=[]
     conditions={
         'wide':{},
         'narrow_h':dict(hang_deg=5,grip_mm=5,tilt_deg=2,basket_xy_mm=0,basket_yaw_deg=0),
     }
     for condition,kwargs in conditions.items():
+        kwargs=dict(kwargs,pc_goal=pc_goal) if pc_goal else kwargs
         for name in ('fixed','p','ppo'):
             row=evaluate_details(name,net,episodes,seed,kwargs); row['condition']=condition; rows.append(row)
     (out/'comparison.json').write_text(json.dumps(rows,indent=1))
@@ -217,12 +219,13 @@ def main():
     p.add_argument('--clip',type=float,default=.2); p.add_argument('--vf',type=float,default=.5); p.add_argument('--ent',type=float,default=.002)
     p.add_argument('--eval_every',type=int,default=2); p.add_argument('--seed',type=int,default=0)
     p.add_argument('--checkpoint',default=''); p.add_argument('--eval_only',action='store_true')
+    p.add_argument('--pc_goal',action='store_true',help='(opt-in) point-cloud goal obs + fit/Chamfer reward')
     p.add_argument('--export_physics',default='',help='prefix for matched _p.npz and _ppo.npz replay bundles')
     a=p.parse_args(); out=Path(a.out); out.mkdir(parents=True,exist_ok=True)
     if a.eval_only:
-        net=ActorCritic(DockEnv.obs_dim,DockEnv.act_dim).cuda(); net.load_state_dict(torch.load(a.checkpoint,map_location='cuda',weights_only=True)); logs=[]
+        net=ActorCritic(DockEnv(1,pc_goal=a.pc_goal).obs_dim,DockEnv.act_dim).cuda(); net.load_state_dict(torch.load(a.checkpoint,map_location='cuda',weights_only=True)); logs=[]
     else: net,logs=train(a)
-    report(net,logs,out)
+    report(net,logs,out,pc_goal=a.pc_goal)
     if a.export_physics:
         print(json.dumps(dict(physics_trajectories=export_physics_trajectories(net,a.export_physics)),indent=1))
 

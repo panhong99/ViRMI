@@ -51,7 +51,7 @@ class DockEnv:
                  basket_yaw_deg=1.0, pitch_frac=0.05, lean_deg=3.0, descend_extra_mm=0.0,
                  residual_xy_mm=80.0, residual_pitch_deg=15.0, hover_until=None, hover_max=120, hover_step_mm=2.0,
                  hover_tilt_deg=None, target_x_mm=0.0, lean_follow=0.0,
-                 depth_obs=False, freeze_in_tines=False):
+                 depth_obs=False, freeze_in_tines=False, pc_goal=False, pc_points=32):
         self.device = torch.device(device)
         self.n, self.path_steps, self.hover_steps = int(num_envs), int(steps), int(hover_steps)
         # (Claude 10/29 3rd review, opt-in) after the taught end keep going down 2 mm a step until floor contact,
@@ -70,6 +70,12 @@ class DockEnv:
         # (opt-in) no correction once the plate bottom is below the tine tips: moving inside the tines drives the plate
         # through them (physics replay lands it 2-6 gaps off)
         self.freeze_in_tines = bool(freeze_in_tines)
+        # (보스 10/30, opt-in) point-cloud goal: the GT is the plate seated in the target gap (bottom at the gap root on
+        # the floor, face along the tine lean); obs += the plate's and the goal's points (basket frame, about the goal
+        # centre, 2 mm noise), reward += fit ratio (points within 5 mm of the goal) - Chamfer distance in gap pitches
+        self.pc_goal, self.pc_m = bool(pc_goal), int(pc_points)
+        if self.pc_goal:
+            self.obs_dim = 9 + 6 * self.pc_m
         self.steps = self.path_steps + self.hover_steps + self.extra_steps + (self.hover_max if hover_until else 0)
         self.gen = torch.Generator(device=self.device).manual_seed(int(seed))
         J = np.load(job)
@@ -106,6 +112,11 @@ class DockEnv:
         th = torch.linspace(0, 2 * math.pi, 17, device=self.device)[:-1]
         self.rim_local = torch.stack((self.plate_r * torch.cos(th), self.plate_r * torch.sin(th),
                                       torch.zeros_like(th)), 1)
+        if self.pc_goal:                                     # a disc: 16 rim points + the rest spread inside (sunflower)
+            k = torch.arange(self.pc_m - 16, device=self.device, dtype=torch.float32)
+            rr = self.plate_r * torch.sqrt((k + 0.5) / len(k)); aa = k * 2.39996
+            inner = torch.stack((rr * torch.cos(aa), rr * torch.sin(aa), torch.zeros_like(rr)), 1)
+            self.disc_local = torch.cat((self.rim_local, inner), 0)
         self._alloc()
 
     def _alloc(self):
@@ -267,9 +278,37 @@ class DockEnv:
             err_across = ((bottom_b[:, 1] - yc) + torch.randn(self.n, generator=self.gen, device=self.device) * 0.003) / self.pitch0
         remaining = 1.0 - self.phase.float() / (self.steps - 1)
         low = (bottom_b[:, 2] - self.floor_z) / 0.15
-        return torch.stack((err_along, err_across, tilt_error / math.radians(20), remaining, low,
-                            self.prev_action[:, 0], self.prev_action[:, 1], self.prev_action[:, 2],
-                            self.band_valid.float()), 1).clamp(-5, 5)
+        o = torch.stack((err_along, err_across, tilt_error / math.radians(20), remaining, low,
+                         self.prev_action[:, 0], self.prev_action[:, 1], self.prev_action[:, 2],
+                         self.band_valid.float()), 1).clamp(-5, 5)
+        if not self.pc_goal:
+            return o
+        cur, goal = self._clouds(P, root_x, yc)
+        c0 = goal.mean(1, keepdim=True)
+        noisy = cur + torch.randn(cur.shape, generator=self.gen, device=self.device) * 0.002
+        return torch.cat((o, ((noisy - c0) / 0.1).flatten(1).clamp(-5, 5), ((goal - c0) / 0.1).flatten(1)), 1)
+
+    def _clouds(self, P, root_x, yc):
+        """-> the plate's points and the seated-goal points (N,M,3) in the basket frame."""
+        R = self.Tbb[:, :3, :3].transpose(1, 2)
+        X = (P[:, :3, :3] @ self.disc_local.T).transpose(1, 2) + P[:, None, :3, 3]
+        cur = (R @ (X - self.Tbb[:, None, :3, 3]).transpose(1, 2)).transpose(1, 2)
+        s, c = torch.sin(self.lean), torch.cos(self.lean)
+        z0 = torch.zeros_like(s)
+        u = torch.stack((-s, z0, c), 1)                    # up in the seated face (tine lean about basket y)
+        v = torch.stack((z0, torch.ones_like(s), z0), 1)
+        centre = torch.stack((root_x, yc, torch.full_like(yc, self.floor_z)), 1) + self.plate_r * u
+        L = self.disc_local
+        goal = centre[:, None] + L[None, :, 0:1] * u[:, None] + L[None, :, 1:2] * v[:, None]
+        return cur, goal
+
+    def pc_fit(self):
+        """-> (fit ratio: plate points within 5 mm of the goal cloud, symmetric Chamfer distance [m])."""
+        P, _, _, _, root_x, yc, _ = self._geometry()
+        cur, goal = self._clouds(P, root_x, yc)
+        D = torch.cdist(cur, goal)
+        a, b = D.min(2).values, D.min(1).values
+        return (a < 0.005).float().mean(1), (a.mean(1) + b.mean(1)) / 2
 
     def step(self, action):
         action = action.clamp(-1, 1)
@@ -309,6 +348,9 @@ class DockEnv:
         reward = -e.abs() - 0.25 * ey.abs() - 0.20 * tilt.abs() - 0.01 * (action - old_action).square().sum(1)
         reward += inside.float() * (0.2 + 0.8 * (1.0 - obs[:, 3]))
         reward -= (e.abs() > 1.0).float() * 2.0
+        if self.pc_goal:
+            fit, cham = self.pc_fit()
+            reward += fit - cham / self.pitch0
         contact = active & height_ok
         timeout = active & (self.phase >= self.steps - 1)
         newly_done = contact | timeout
@@ -319,6 +361,8 @@ class DockEnv:
         reward += newly_done.float() * (success.float() * 12.0 - (~success).float() * 6.0)
         self.last_info = dict(success=self.terminal_success, along=e, across=ey,
                               angle_ok=angle_ok, height_ok=height_ok)
+        if self.pc_goal:
+            self.last_info.update(fit=fit, chamfer=cham)
         return obs, reward, self.terminated, self.last_info
 
     def _holding(self):

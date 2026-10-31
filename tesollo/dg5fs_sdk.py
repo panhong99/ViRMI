@@ -153,6 +153,7 @@ SLOT_SHIFT = [0.0, 0.0]     # (--slot_dx / --slot_dy [mm], 보스 10/30) taught_
 TAUGHT_PIVOT = ['model']    # (--taught_pivot, 보스 10/30) taught_plan.py --pivot: slot = turn the wrist about the real plate bottom
 INHAND = [False]
 INHAND_YAW = [False]        # (--inhand_yaw, 보스 10/30) and re-plan the insert with the measured yaw taken out (taught_plan --yaw_corr)            # (--inhand_check, 보스 10/30) plate: stop at the lift top, fixed camera measures the plate in the hand
+POLICY = [None]             # (--policy_insert [CKPT], 보스 10/31) the point-cloud docking RL corrects the taught insert (policy_insert.py)
 TEACH = [False]             # (--teach, 보스 10/29) plate: the plan stops above the basket, the insert is taught by the pendant
 CONTACT = REPO / 'tesollo/grasp_contact.json'   # finger joints at the end of the last grasp per object (the pre-close target)
 TAUGHT = REPO / 'tesollo/taught_inserts.json'   # every taught insert: joints + basket pose + plate in the hand
@@ -336,13 +337,18 @@ def basket(obj, quadrant, pin, centre_h=None):
     i_leg = 0
     while i_leg < len(legs):
         plan, leg = legs[i_leg]
-        sparse = leg in ('post_grasp', 'insert', 'return_home', 'carry_insert', 'carry_down', 'inhand_lift', 'inhand_rest')   # few knots: the controller spline smooths them
-        if not mover(plan, leg, INSERT_VEL[0] if leg == 'insert' else VEL[0], ['--max_step_deg', '90'] if sparse else []):
+        sparse = leg in ('post_grasp', 'insert', 'return_home', 'carry_insert', 'carry_down', 'inhand_lift', 'inhand_rest',
+                         'policy_carry', 'policy_insert')   # few knots: the controller spline smooths them
+        if not mover(plan, leg, INSERT_VEL[0] if leg in ('insert', 'policy_insert') else VEL[0], ['--max_step_deg', '90'] if sparse else []):
             return False
         if leg == 'inhand_lift':
             meas = inhand_measure(quadrant, pin, q_top)
             if meas and INHAND_YAW[0]:
                 rest = inhand_replan(obj, quadrant, pin, meas, q_top, first)
+                if rest:
+                    legs = legs[:i_leg + 1] + rest
+            if meas and POLICY[0]:
+                rest = policy_replan(plan, quadrant, pin, meas, q_top)
                 if rest:
                     legs = legs[:i_leg + 1] + rest
         i_leg += 1
@@ -412,6 +418,33 @@ def inhand_replan(obj, quadrant, pin, meas, q_top, first):
     BASKET['plan'] = m.group(1)
     print(f'   yaw {-yaw:+.1f} deg corrected (re-plan {time.time() - t0:.1f} s): {m.group(1)}', flush=True)
     return legs[1:]
+
+
+def policy_replan(plan_path, quadrant, pin, meas, q_top):
+    """(--policy_insert, 보스 10/31) the dock RL policy's corrected insert from the lift top (tesollo/policy_insert.py: kinematic
+    rollout with this basket / pin / measured face normal, J4-held IK, URDF limits) -> the legs after the lift top, or None
+    (refused or failed: the planned legs go on unchanged)."""
+    if meas.get('rim_fit_mad_mm', 99) > 15 or 'normal_flange' not in meas:
+        print(f'   policy insert skipped (rim fit {meas.get("rim_fit_mad_mm")} mm)', flush=True)
+        return None
+    t0 = time.time()
+    cmd = [str(PLAN_PY), str(REPO / 'tesollo/policy_insert.py'), '--plan', str(plan_path), '--quadrant', quadrant, '--pin', str(pin),
+           '--q_top'] + [str(v) for v in q_top] + ['--normal_flange'] + [str(v) for v in meas['normal_flange']] \
+        + (['--basket', BASKET_JSON[0]] if BASKET_JSON[0] else []) + (['--ckpt', POLICY[0]] if POLICY[0] != 'default' else [])
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=120, cwd=str(REPO))
+    except subprocess.TimeoutExpired:
+        print('   policy insert: timed out, the taught insert goes on', flush=True)
+        return None
+    m = re.search(r'^plan: (\S+)', out.stdout, re.M)
+    if out.returncode or not m:
+        print(f'   policy insert not used: {((out.stdout + out.stderr).strip().splitlines() or ["(no output)"])[-1][:220]}', flush=True)
+        return None
+    rep = json.loads(Path(m.group(1)).read_text()).get('policy_insert', {})
+    BASKET['plan'], BASKET['out_leg'] = m.group(1), 'policy_return'
+    print(f'   policy insert ({time.time() - t0:.1f} s): sim seat {rep.get("sim_end")}, corrections {rep.get("max_correction")}, '
+          f'max joint step {rep.get("max_joint_step_deg")} deg, URDF margin {rep.get("joint_margin_deg")} deg', flush=True)
+    return [(m.group(1), 'policy_carry'), (m.group(1), 'policy_insert')]
 
 
 def robot_joints():
@@ -607,6 +640,10 @@ def main():
                    '(+ = toward the L row)')
     p.add_argument('--inhand_yaw', action='store_true', help='(보스 10/30, opt-in; with --inhand_check --taught_pivot slot) '
                    'take the measured in-hand yaw out: the insert re-planned at the lift top (taught_plan --yaw_corr)')
+    p.add_argument('--policy_insert', nargs='?', const='default', default=None, metavar='CKPT',
+                   help='(보스 10/31, opt-in; with --inhand_check, taught plate) the point-cloud docking RL (v11, or CKPT) '
+                   'corrects the taught insert from the lift top (tesollo/policy_insert.py); refused -> the taught insert. '
+                   'Use without --slot_dx / --slot_dy / --inhand_yaw (the policy aims at the gap itself)')
     p.add_argument('--inhand_check', action='store_true', help='(보스 10/30, opt-in) plate: stop at the lift top, the fixed '
                    'camera measures the plate in the hand (experiments/inhand/plate_inhand.py, read-only), then go on')
     p.add_argument('--stepwise', action='store_true', help='(old) post-grasp legs as before: plate stops 1 cm over the slot '
@@ -625,6 +662,9 @@ def main():
     INHAND_YAW[0] = a.inhand_yaw and a.inhand_check and a.taught_pivot == 'slot'
     if a.inhand_yaw and not INHAND_YAW[0]:
         sys.exit('--inhand_yaw needs --inhand_check and --taught_pivot slot')
+    POLICY[0] = a.policy_insert
+    if POLICY[0] and (not a.inhand_check or a.inhand_yaw):
+        sys.exit('--policy_insert needs --inhand_check (and not --inhand_yaw)')
     ARM_APPROACH[:] = ['above', 'down'] if a.approach_stop else ARM_APPROACH
     TEACH[0] = a.teach
     INSERT_VEL[0] = a.insert_vel
@@ -894,7 +934,7 @@ def main():
                 if BASKET and ((BASKET.get('down') and AUTO[0]) or
                                input('\n5. arm: ascend + home with the basket plan?  Enter = go, n = no: ').strip().lower() != 'n'):
                     out_leg = BASKET.get('out_leg', 'ascend')
-                    one = out_leg in ('return_home', 'return_home_smooth', 'up_home')
+                    one = out_leg in ('return_home', 'return_home_smooth', 'up_home', 'policy_return')
                     moved = mover(BASKET['plan'], out_leg, VEL[0], ['--max_step_deg', '90'] if one else [])
                     if moved and not one:
                         mover(BASKET['plan'], 'to_home', VEL[0])

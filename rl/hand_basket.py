@@ -55,6 +55,7 @@ def parse():
                    'on the settled plates after the results are saved, until it is closed')
     p.add_argument('--viewer_cam', type=float, nargs=3, default=None,
                    help='(opt-in, 보스 10/31 GIF) --viewer: eye offset [m] from env 0 basket centre, looking at it')
+    p.add_argument('--viewer_all', action='store_true', help='--viewer_cam: look at the centre of all envs, not env 0')
     p.add_argument('--hand', action='store_true', help='opt-in M1013 + DG-5F-S collision replay (job must contain arm_q)')
     p.add_argument('--hand_contact_n', type=float, default=1.0, help='hand-basket contact threshold [N]')
     p.add_argument('--dock_traj', default='', help='eval: dock_train.py exported residual trajectory bundle')
@@ -142,7 +143,8 @@ def main():
     scene = InteractiveScene(SceneType(num_envs=N, env_spacing=2.0))
     sim.reset()
     if a.viewer and a.viewer_cam:
-        tgt = np.asarray(scene.env_origins[0].cpu()) + Tbb[:3, 3]
+        org0 = scene.env_origins.cpu().numpy()
+        tgt = (org0.mean(0) if a.viewer_all else org0[0]) + Tbb[:3, 3]
         sim.set_camera_view(eye=(tgt + np.asarray(a.viewer_cam)).tolist(), target=tgt.tolist())
     dev = sim.device
     plate = scene['plate']

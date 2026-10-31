@@ -5823,3 +5823,10 @@ DockEnv opt-in을 더 넣어 P를 Isaac으로 쟀다(seed 51024, 1024개, 바구
 - 실기 도달성(읽기 전용 IK): 관절 한계 여유 ≥43°; J5 특이점 통과 ~10 %(대부분 빗살 위 공중) → 연속 IK + 관절 보간 실행기 필요.
 - 보스 확인 필요: (1) 실기 손목 ±40° 피치 보정 가능 여부, (2) 실행기(opt-in) 작업 승인, (3) 가우시안 스플래팅용 셀 촬영 영상.
 - Codex: 10/30 15:29 이후 커밋 없음(TASKBOARD 할 일 대기).
+
+## 2026-10-31 14:0x Claude — 실기 실행기 `--policy_insert` (보스 승인: "만들어 놔, 월요일 확인"; 손목 = URDF가 허용하면 OK)
+- `tesollo/policy_insert.py`(신규) + `dg5fs_sdk.py --policy_insert [CKPT]`(opt-in, `--inhand_check` 필요, `--inhand_yaw`/slot_dx/dy와 같이 쓰지 않음). 들어 올린 위치의 손 안 측정 뒤: 지금 계획(taught_plan) 경로 + 이 바구니·칸 + 측정 법선으로 운동학 env에서 v11 정책을 굴려 보정 궤적 → 2 mm 플랜지 경로에 적용 → J4 고정 5-DOF IK(원판이라 중심 3 + 법선 2) → legs `policy_carry`(들어 올린 위치 → 1 cm 위) / `policy_insert`(삽입, --insert_vel) / `policy_return`(역순 → 홈). 거부(기존 경로 그대로): IK 없음, URDF 한계 밖, 2 mm당 관절 >8°, 시뮬에서 정책이 못 꽂음.
+- 손 안 H: H_nom을 측정 법선으로 돌리되 **티칭 때 접시 최저점 기준**(10/30 slot pivot·yaw 보정과 같은 관례; 중심 기준이면 x 70 mm 오보정). 측정 중심은 10/30 편향 때문에 기본 미사용(`--use_centre`).
+- 오프라인(10/30 실측 21개, 계획 Q3 pin 6, wrist_less 25, pivot slot): **12개 통과**(시뮬 안착 1.4–5.5 mm, 관절 2 mm당 ≤4.5°, URDF 여유 50°, 2.6 s), 9개 거부(손 안 yaw ≥22° 등 시뮬 실패). 통과 시 보정 x ~36 mm, y ~33 mm, 피치 ~11°, yaw ~17°, 추가 하강 ~26 mm. 경유점 경로 오차 삽입 2.1 mm.
+- J5: 티칭 경로 자체가 −8.6°(특이점 근처). J4 고정이면 J5가 0을 지나도 J4/J6 뒤집힘 없음(관절 점프 검사로 확인).
+- **월요일 실행(보스)**: `bash /home/pan/pan/6D_pose/tesollo/demo_safe.sh --taught_pivot slot --inhand_check --policy_insert --new_demo` (demo 파일 변경 질문에 `yes`; 처음엔 `--leg_enter`를 더해 다리마다 확인 권장). 로그 `outputs/policy_insert/*.json`.

@@ -50,3 +50,5 @@
 - 실기 후보 **v11** `outputs/dock_rl_20261030/pc_rand_v11/final.pt`(v7 + 무작위 점·가림·측정/목표 오차; Isaac 랜덤화 78.6 %, 깨끗 81.2 %). 이전 최고 v7 `outputs/dock_rl_20261030/pc_p40_v7/final.pt`: Isaac 물리 77.4 % / 81.1 %(seed 51024/61024) vs P 43.9 / 50.6 %. 핵심 = 피치 잔차 한계 40°(가르친 경로가 ~10° 치우침) + 각도 판정 6°(20°는 물리에서 넘어지는 접시를 성공으로 셈) + 목표 x +10 mm.
 - 10/30 22:3x 전 물리 수치는 export 버그(바닥 접촉 뒤 knot 잔차 0)로 무효. 상세 LOG 10/30 22:3x.
 - 보스 확인 필요: 실기 손목이 ±40° 피치 보정을 낼 수 있는지(지금 실기 `--wrist_less 25`).
+- **실기 실행기(10/31, 미실행)**: `bash /home/pan/pan/6D_pose/tesollo/demo_safe.sh --taught_pivot slot --inhand_check --policy_insert --new_demo [--leg_enter]` — 손 안 측정 뒤 v11 보정 경로로 삽입, 거부되면 기존 티칭 경로. 상세 LOG 10/31 14:0x. 보스가 월요일 확인.
+- PPT(포트폴리오 3–7장) 자료: `outputs/portfolio_nis_20261031/`. 월요일: 실기 핸드 삽입 영상(6장 GIF 교체), 가우시안 스플래팅용 셀 촬영.

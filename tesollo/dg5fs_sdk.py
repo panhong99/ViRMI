@@ -156,6 +156,8 @@ INHAND_YAW = [False]        # (--inhand_yaw, 보스 10/30) and re-plan the inser
 POLICY = [None]             # (--policy_insert [CKPT], 보스 10/31) the point-cloud docking RL corrects the taught insert (policy_insert.py)
 GT_REPLAY = [None, []]      # (--gt_replay [GT] + --gt_dx_mm ..., 보스 11/02) the 1st real success moved to this pin (gt_replay.py)
 PLATE_PIN = [None]          # (--plate_pin N, 보스 11/02) plate: this pin of the first plate quadrant (Q3) instead of the auto choice
+PLATE_PINS = []             # (--plate_pins N M, 보스 11/02) the same, by order: 1st plate today -> N, 2nd -> M (one command for both)
+GT_DX_ORDER = []            # (--gt_dx_by_order A B, 보스 11/02) --gt_dx_mm by order (red 1st, white 2nd)
 BY_ORDER = [False]          # (--plates_by_order, 보스 11/02) plates: the remembered order only, plates seen by the camera ignored
 POLICY_EXTRA = []           # (--policy_yaw_trim / --policy_max_descent_mm, 11/02) passed on to policy_insert.py
 TEACH = [False]             # (--teach, 보스 10/29) plate: the plan stops above the basket, the insert is taught by the pendant
@@ -231,9 +233,11 @@ def auto_targets(obj):
     full = {q for q, v in SEEN.items() if v and not (v == 'plate' and (q in SEEN_PINS or BY_ORDER[0]))} | set(st['bowls'])
     if obj == 'bowl':
         return [(q, 6, 'empty') for q in BOWL_QUADRANTS if q not in full and q not in plate_q]
-    if PLATE_PIN[0]:                                           # (보스 11/02) the pin asked: the 1st plate's quadrant, else Q3
+    if PLATE_PIN[0] or PLATE_PINS:                             # (보스 11/02) the pin asked: the 1st plate's quadrant, else Q3
         q = plate_q[-1] if plate_q else PLATE_QUADRANTS[0]
-        return [(q, PLATE_PIN[0], 'asked (--plate_pin)')]
+        n = len(load_state()['plates'])
+        pin = PLATE_PIN[0] or PLATE_PINS[min(n, len(PLATE_PINS) - 1)]
+        return [(q, pin, f'asked (plate {n + 1} today)')]
     if plate_q and plate_q.count(plate_q[-1]) == 1:            # the 2nd plate: back of the 1st one's quadrant
         q = plate_q[-1]
         taken = [p_['pin'] for p_ in st['plates'] if p_['q'] == q]
@@ -442,7 +446,8 @@ def gt_replan(plan_path, quadrant, pin, q_top):
     t0 = time.time()
     cmd = [str(PLAN_PY), str(REPO / 'tesollo/gt_replay.py'), '--plan', str(plan_path), '--quadrant', quadrant, '--pin', str(pin),
            '--q_top'] + [str(v) for v in q_top] + (['--basket', BASKET_JSON[0]] if BASKET_JSON[0] else []) \
-        + (['--gt', GT_REPLAY[0]] if GT_REPLAY[0] != 'default' else []) + GT_REPLAY[1]
+        + (['--gt', GT_REPLAY[0]] if GT_REPLAY[0] != 'default' else []) + GT_REPLAY[1] \
+        + (['--dx_mm', str(GT_DX_ORDER[min(len(load_state()['plates']), len(GT_DX_ORDER) - 1)])] if GT_DX_ORDER else [])
     out = subprocess.run(cmd, capture_output=True, text=True, timeout=120, cwd=str(REPO))
     m = re.search(r'^plan: (\S+)', out.stdout, re.M)
     if out.returncode or not m:
@@ -690,6 +695,10 @@ def main():
     p.add_argument('--gt_dpitch_deg', type=float, default=0.0, help='(--gt_replay) plate turn about the basket y')
     p.add_argument('--plate_pin', type=int, default=None, help='(보스 11/02, opt-in) plate: put it in this pin (Q3, or the '
                    'quadrant of the plate already in) instead of the auto front / back choice')
+    p.add_argument('--plate_pins', type=int, nargs='+', default=[], metavar='PIN', help='(보스 11/02, opt-in) the pin by order: '
+                   '1st plate today -> the 1st value, 2nd -> the 2nd (Q3 or the quadrant of the plate already in)')
+    p.add_argument('--gt_dx_by_order', type=float, nargs='+', default=[], metavar='MM', help='(--gt_replay) --gt_dx_mm by order: '
+                   '1st plate today (red) -> the 1st value, 2nd (white) -> the 2nd')
     p.add_argument('--plates_by_order', action='store_true', help='(보스 11/02, opt-in) plate targets from the remembered order '
                    'only (1st front, 2nd back of it); plates the camera sees are ignored (reflections were seen as plates)')
     p.add_argument('--policy_yaw_trim', action='store_true', help='(11/02, opt-in; with --policy_insert) also take out the '
@@ -725,6 +734,8 @@ def main():
         sys.exit('--gt_replay needs --inhand_check (and not --policy_insert / --inhand_yaw)')
     BY_ORDER[0] = a.plates_by_order
     PLATE_PIN[0] = a.plate_pin
+    PLATE_PINS[:] = a.plate_pins
+    GT_DX_ORDER[:] = a.gt_dx_by_order
     POLICY_EXTRA[:] = (['--yaw_trim'] if a.policy_yaw_trim else []) \
         + (['--max_descent_mm', str(a.policy_max_descent_mm)] if a.policy_max_descent_mm is not None else [])
     ARM_APPROACH[:] = ['above', 'down'] if a.approach_stop else ARM_APPROACH

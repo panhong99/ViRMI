@@ -5839,3 +5839,4 @@ DockEnv opt-in을 더 넣어 P를 Isaac으로 쟀다(seed 51024, 1024개, 바구
 - 09:48 두 번째 측정(yaw 25°, 면 −20°)은 정책 거부 → 티칭 경로로 감.
 - 다음 실기(보스): `bash /home/pan/pan/6D_pose/tesollo/demo_safe.sh --taught_pivot slot --inhand_check --policy_insert --policy_yaw_trim --policy_max_descent_mm 10 --new_demo --leg_enter`
 - (10:0x) 2회차 L8/R6 다시: 측정 yaw 22°(`20261102_095920.json`), 정책이 x/y/높이는 맞췄으나 면 6.2°(> 6°)로 거부 → 보정 없는 티칭 삽입 → L8/R6. 즉 yaw 보정은 실기에서 아직 안 돌았음. 수정 f028987: `--yaw_trim`이면 면 각도만 넘친 결과도 받아 yaw를 마저 빼고 다시 판정(09:59 경우 0.4°), 그래도 거부되면 10/30 `--inhand_yaw` 재계획(L5/R5 방식)으로. 과거 측정 23개 통과 15개(전 12).
+- (10:08) **3회차 성공: Q3 pin 6 정확히 L6/R6** (보스). 정책 경로로 들어감(`outputs/policy_insert/20261102_100854.json`): 측정 `20261102_100851.json`, 시뮬 안착 fit 1.0·거리 2.0 mm·면 1.5°, 남은 yaw −0.3°(trim 0.3°), 보정 x 35.5 / y 31.6 mm, pitch 10.5°, yaw 16.5°, 추가 하강 10 mm. 명령: `demo_safe.sh --taught_pivot slot --inhand_check --policy_insert --policy_yaw_trim --policy_max_descent_mm 10 --new_demo --leg_enter`.

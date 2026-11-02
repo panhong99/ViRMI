@@ -5855,3 +5855,10 @@ DockEnv opt-in을 더 넣어 P를 Isaac으로 쟀다(seed 51024, 1024개, 바구
   | 흰 | 8 | −12 | 26 | 19.3 | L8/R9 | −1 |
   - dyaw −12°가 L−R를 2칸 바꿈 → 1칸 ≈ 6°. 같은 손 안 yaw(19.2–19.4°)에서 L−R가 0/+1로 갈림 → 남은 ±1칸 짝 오차는 손 안 측정 yaw로 설명 안 되는 파지 편차. 다음: dyaw −6, 빨강 dx −10, 흰 dx 31(두 결과 평균 위치 보간).
 - (11:0x) 빨강 4 → L4/R4, 흰 8 → L6/R7 (dyaw −6, dx −10 / 31). 실측 8회 (착지 − 조준, 칸): 빨강 0, −0.5, −1.0, −0.5 / 흰 +1.8, +1.3, +1.8, +0.05(평균 +1.2 ± 0.9). 흰 산포는 손 안 측정(중심·yaw)과 무관 = 파지 편차. `--plate_pins N M`, `--gt_dx_by_order A B`(순서별 칸·보정, 한 명령). 접시 위치가 바뀌어도 GT 재생 가능(perceive + shifted_grasp, 운동학; ±10/±15 cm 오프라인 OK).
+
+## 2026-11-02 11:1x Codex — 측면 카메라 L/R pair residual GUI
+- 보스 지시: 현재 시연을 방해하지 않고 측면 카메라로 삽입 전 pair 정렬값을 뽑아 GUI로 표시.
+- 구현: `experiments/side_cam/pair_view.py`. 기존 slot CNN + empty-basket anchor로 Q3 두 빗살 줄을 번호화하고, YOLOE `plate` mask 외곽선이 각 줄과 만나는 점을 목표 pin 주변에서 선택한다. 출력은 `L(top)/R(bottom)`, 연속 칸 좌표, `L−R`, 실기 민감도(11/02: 1칸≈6°)의 yaw residual이며 명령은 보내지 않는다. yaw 제안은 ±8°로 제한하고 7프레임 median, 3프레임 미만·conf<0.05·기하 score>5는 `WAIT / LOW CONFIDENCE`다.
+- 오프라인 확인: `rec_101200/005000.jpg`, pin 6 → L 8.28 / R 6.40, pair +1.89칸, raw −11.3°, 제한 −8.0°, conf 0.09. 오버레이 `outputs/side_cam_pair_20261102/offline_pin6_frame5000.png`.
+- 실시간 read-only GUI: PID 2520017, 시작 tick 61031638, 로그 `outputs/side_cam_pair_20261102/live.log`. 모든 gap은 회색 윤곽, 현재 선택 gap은 초록 `TARGET`, 실제 외곽선 교차점은 흰 `L/R CROSS`로 구분했다. 접시의 윗등 돌출은 판정에 쓰지 않고 두 빗살 줄 교차점만 쓴다. 현재 접시가 목표 band 근처에 없으면 `waiting for a plate`로 유지한다. 로봇·핸드·ROS 명령 없음.
+- 검증: `python -m py_compile experiments/side_cam/pair_view.py`; `calibration/tests.py` **109 tests / OK**(exit 0, `/tmp/side_pair_calibration_tests_20261102_rerun.log`).

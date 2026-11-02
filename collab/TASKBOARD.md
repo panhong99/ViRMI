@@ -3,6 +3,11 @@
 Phase 2 작업판이다(10/20 보스 시작). Phase 1(10/22 시연까지)의 작업판은 `collab/TASKBOARD_phase1_until_20261022.md`에 보관했다.
 일하는 방식은 그대로 `collab/WORK_RULES.md`를 따른다. 진행 기록은 `collab/LOG.md`, 결정은 `collab/DECISIONS.md`에 남긴다.
 
+## 11/02 측면 카메라 pair residual (Codex)
+
+- **완료 조건**: 로봇 명령 없이 측면 Q3 영상에서 CNN 번호 빗살 두 줄과 YOLOE 접시 외곽선을 겹쳐 예상 L/R pair, 연속 pair 오차, 제한된 yaw residual을 GUI와 터미널에 표시한다. 불확실하면 `WAIT / LOW CONFIDENCE`로 보정값 사용을 막는다.
+- **상태**: 완료(커밋 예정). `experiments/side_cam/pair_view.py`; 과거 frame 5000에서 L(top) 8.28 / R(bottom) 6.40, raw yaw −11.3°, 제한 −8.0°, YOLOE conf 0.09로 low-confidence 표시. 모든 gap은 회색, 선택 gap은 `TARGET`, 측정점은 `L/R CROSS`로 구분. 실시간 read-only GUI PID 2520017.
+
 ## 목표 (보스 10/20)
 
 1. **바구니 위치와 접시 위치에 대한 의존성을 없앤다.** 신뢰도 100%로 풀어야 한다.

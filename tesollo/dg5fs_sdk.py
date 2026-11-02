@@ -157,6 +157,8 @@ INHAND_YAW = [False]        # (--inhand_yaw, 보스 10/30) and re-plan the inser
 POLICY = [None]             # (--policy_insert [CKPT], 보스 10/31) the point-cloud docking RL corrects the taught insert (policy_insert.py)
 GT_REPLAY = [None, []]      # (--gt_replay [GT] + --gt_dx_mm ..., 보스 11/02) the 1st real success moved to this pin (gt_replay.py)
 PLATE_PIN = [None]          # (--plate_pin N, 보스 11/02) plate: this pin of the first plate quadrant (Q3) instead of the auto choice
+FLOW = [False]              # (--flow, 보스 11/02, opt-in) fewer stops: the hand pre-pose while the arm approaches; with
+                            # --gt_replay the GT insert planned before the lift and lift + carry as one leg (no in-hand check)
 PLATE_PINS = []             # (--plate_pins N M, 보스 11/02) the same, by order: 1st plate today -> N, 2nd -> M (one command for both)
 GT_DX_ORDER = []            # (--gt_dx_by_order A B, 보스 11/02) --gt_dx_mm by order (red 1st, white 2nd)
 BY_ORDER = [False]          # (--plates_by_order, 보스 11/02) plates: the remembered order only, plates seen by the camera ignored
@@ -348,11 +350,13 @@ def basket(obj, quadrant, pin, centre_h=None):
     q_top, first = None, legs[0][1]
     if INHAND[0] and obj == 'plate':
         legs, q_top = inhand_split(legs)
+        if FLOW[0] and GT_REPLAY[0] and q_top is not None:
+            legs = flow_legs(legs, quadrant, pin, q_top) or legs
     i_leg = 0
     while i_leg < len(legs):
         plan, leg = legs[i_leg]
         sparse = leg in ('post_grasp', 'insert', 'return_home', 'carry_insert', 'carry_down', 'inhand_lift', 'inhand_rest',
-                         'policy_carry', 'policy_insert')   # few knots: the controller spline smooths them
+                         'policy_carry', 'policy_insert', 'flow_carry')   # few knots: the controller spline smooths them
         if not mover(plan, leg, INSERT_VEL[0] if leg in ('insert', 'policy_insert') else VEL[0], ['--max_step_deg', '90'] if sparse else []):
             return False
         if leg == 'inhand_lift':
@@ -397,6 +401,22 @@ def inhand_split(legs):
     out = Path(plan_path).with_name('plan_inhand.json')
     out.write_text(json.dumps(plan, indent=1))
     return [(str(out), 'inhand_lift'), (str(out), 'inhand_rest')] + legs[1:], W[top]
+
+
+def flow_legs(legs, quadrant, pin, q_top):
+    """(--flow) the GT insert planned now (~1 s, no measurement needed) and the lift + its carry merged into one leg
+    'flow_carry' -> [(plan_gt, 'flow_carry'), (plan_gt, 'policy_insert')], or None (GT refused: the usual legs)."""
+    rest = gt_replan(legs[0][0], quadrant, pin, q_top)
+    if not rest:
+        return None
+    gt_path = rest[0][0]
+    plan = json.loads(Path(gt_path).read_text())
+    lift = json.loads(Path(legs[0][0]).read_text())['legs']['inhand_lift']['waypoints_deg']
+    carry = plan['legs']['policy_carry']
+    plan['legs']['flow_carry'] = dict(carry, waypoints_deg=lift + carry['waypoints_deg'][1:])
+    Path(gt_path).write_text(json.dumps(plan, indent=1))
+    print(f'   flow: lift + carry as one leg ({len(lift)} + {len(carry["waypoints_deg"]) - 1} knots)', flush=True)
+    return [(gt_path, 'flow_carry'), rest[1]]
 
 
 def inhand_measure(quadrant, pin, q_top):
@@ -712,6 +732,8 @@ def main():
                    'extra descent after the path (sim: ~26 mm down to its floor) so the hand does not push the plate')
     p.add_argument('--inhand_check', action='store_true', help='(보스 10/30, opt-in) plate: stop at the lift top, the fixed '
                    'camera measures the plate in the hand (experiments/inhand/plate_inhand.py, read-only), then go on')
+    p.add_argument('--flow', action='store_true', help='(보스 11/02, opt-in) fewer stops: the hand pre-pose while the arm '
+                   'approaches; with --gt_replay the GT insert planned before the lift, lift + carry as one leg (no in-hand check)')
     p.add_argument('--stepwise', action='store_true', help='(old) post-grasp legs as before: plate stops 1 cm over the slot '
                    'and inserts at --insert_vel, bowl stops above its quadrant; acc = vel')
     p.add_argument('--acc_ratio', type=float, default=0.5, help='arm acc [deg/s^2] = this x --vel (보스 10/29: softer starts / '
@@ -723,6 +745,7 @@ def main():
     LIFT_M[0], TAUGHT_LESS[0], BOWL_LIFT[0] = a.lift, a.taught_wrist_less, a.bowl_lift
     SMOOTH[0], ACC[0] = not a.stepwise, 1.0 if a.stepwise else a.acc_ratio
     INHAND[0] = a.inhand_check
+    FLOW[0] = a.flow
     TAUGHT_PIVOT[0] = a.taught_pivot
     SLOT_SHIFT[:] = [a.slot_dx, a.slot_dy]
     INHAND_YAW[0] = a.inhand_yaw and a.inhand_check and a.taught_pivot == 'slot'
@@ -876,8 +899,9 @@ def main():
             obj = 'plate' if a.object == 'plate' else 'bowl'
             ask(f'0. hand to the approach pose "{APPROACH_HAND[obj]}" in {a.motion_ms} ms.')
             check('move', g.move_joint_all(load_pose(APPROACH_HAND[obj])))
-            time.sleep(a.motion_ms / 1000 + 0.5)
-            show()
+            if not FLOW[0]:                              # (--flow) the arm leaves while the fingers move
+                time.sleep(a.motion_ms / 1000 + 0.5)
+                show()
             print(f'\n0b. arm: home -> above -> down to the taught {obj} grasp pose', flush=True)
             if (AUTO[0] or input('Enter = go, s = skip (arm already there): ').strip().lower() != 's') and \
                     not arm_legs(a.object, ARM_APPROACH):

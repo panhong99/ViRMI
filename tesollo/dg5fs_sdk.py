@@ -119,7 +119,7 @@ def perceive(proc=None):
         so, se = proc.communicate()
         out = subprocess.CompletedProcess(proc.args, proc.returncode, so, se)
     else:
-        out = subprocess.run([str(PLAN_PY), str(REPO / 'tesollo/perceive.py')], capture_output=True, text=True)
+        out = subprocess.run([str(PLAN_PY), str(REPO / 'tesollo/perceive.py')] + PERCEIVE_ARGS, capture_output=True, text=True)
     print('\n'.join(l for l in out.stdout.splitlines() if not l.startswith('RESULT')), flush=True)
     m = re.search(r'^RESULT (plate|bowl) (\S+) (\S+)$', out.stdout, re.M)
     if out.returncode or not m:
@@ -127,6 +127,7 @@ def perceive(proc=None):
     return m.group(1), float(m.group(2)), float(m.group(3))
 
 
+PERCEIVE_ARGS = []          # (--perceive_radius, 보스 11/02) passed on to perceive.py
 SHIFT = [0.0, 0.0]          # object shift from the taught spot (perceive), applied to every arm plan of this run
 SIM_CORR = ['']             # (--sim_corr) rl/hand_basket.py CEM json passed to basket_plan.py for the plate
 WRIST_LESS = [45.0]         # (보스 10/29 real Q3 photo) plate: the hand turns this much less than the flat-plate plan
@@ -699,6 +700,8 @@ def main():
                    '1st plate today -> the 1st value, 2nd -> the 2nd (Q3 or the quadrant of the plate already in)')
     p.add_argument('--gt_dx_by_order', type=float, nargs='+', default=[], metavar='MM', help='(--gt_replay) --gt_dx_mm by order: '
                    '1st plate today (red) -> the 1st value, 2nd (white) -> the 2nd')
+    p.add_argument('--perceive_radius', type=float, default=None, help='(보스 11/02, opt-in) the object may be this far [m] '
+                   'from the taught grasp spot (perceive.py, default 0.30; the nearest detection wins)')
     p.add_argument('--plates_by_order', action='store_true', help='(보스 11/02, opt-in) plate targets from the remembered order '
                    'only (1st front, 2nd back of it); plates the camera sees are ignored (reflections were seen as plates)')
     p.add_argument('--policy_yaw_trim', action='store_true', help='(11/02, opt-in; with --policy_insert) also take out the '
@@ -735,6 +738,7 @@ def main():
     BY_ORDER[0] = a.plates_by_order
     PLATE_PIN[0] = a.plate_pin
     PLATE_PINS[:] = a.plate_pins
+    PERCEIVE_ARGS[:] = ['--radius', str(a.perceive_radius)] if a.perceive_radius else []
     GT_DX_ORDER[:] = a.gt_dx_by_order
     POLICY_EXTRA[:] = (['--yaw_trim'] if a.policy_yaw_trim else []) \
         + (['--max_descent_mm', str(a.policy_max_descent_mm)] if a.policy_max_descent_mm is not None else [])
@@ -768,7 +772,7 @@ def main():
     # the quadrants wait for the basket file); each loads its own YOLOE, so in a row they took ~20 s
     seen = quad_proc = None
     if a.object == 'auto':
-        seen = subprocess.Popen([str(PLAN_PY), str(REPO / 'tesollo/perceive.py')], stdout=subprocess.PIPE,
+        seen = subprocess.Popen([str(PLAN_PY), str(REPO / 'tesollo/perceive.py')] + PERCEIVE_ARGS, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, text=True)
     if a.object and BASKET_JSON[0]:
         quad_proc = start_quadrants()

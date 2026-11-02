@@ -115,10 +115,12 @@ def main():
     p.add_argument('--object', choices=('plate', 'bowl'), help='look only for this one (default: whichever is seen)')
     p.add_argument('--save_ref', action='store_true', help='the object sits at the taught grasp spot: save its centre')
     p.add_argument('--frames', type=int, default=5)
+    p.add_argument('--radius', type=float, default=0.30, help='(보스 11/02, a plate 31 cm out) only detections this close [m] '
+                   'to the taught grasp spot count, the nearest wins')
     p.add_argument('--conf', type=float, default=0.12, help='(10/27 fixed view: red plate 0.17-0.26)')
     p.add_argument('--png', default=str(ROOT / 'outputs/hand_grasp_20261027/perceive_last.png'))
     a = p.parse_args()
-    r = measure(a.frames, a.conf, a.object, a.png)
+    r = measure(a.frames, a.conf, a.object, a.png, radius=a.radius)
     if not r['ok']:
         sys.exit(f'REFUSED: {r["why"]}')
     print(f'object {r["obj"]} (conf {r["conf"]}), centre {[round(v * 1000, 1) for v in r["centre"]]} mm in base, '

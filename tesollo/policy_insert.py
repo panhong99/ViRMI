@@ -107,44 +107,69 @@ def end_yaw(T, H, Tbb):
     return float(np.degrees(np.arctan2(nb[1], nb[0])))
 
 
-def rollout(F, H, Tbb, gaps_b, gap, ckpt):
-    """the policy in the dock env on this path -> (residual per env knot (S,4), zdown [m], end metrics)"""
+def rollout(F, H, Tbb, gaps_b, gap, ckpt, samples=1):
+    """the policy in the dock env on this path -> (residual per env knot (S,4), zdown [m], end metrics, ..., end flags).
+    samples > 1 (opt-in): env 0 runs the deterministic policy, the others sample its actions; the deterministic one is kept
+    when it seats, else the seated sample nearest the goal (else env 0)."""
     import torch
     from dock_env import DockEnv, _resample_pose
     import dock_pc_train as T
-    env = DockEnv(1, seed=0, **ENV_KW)
+    n = max(1, int(samples))
+    env = DockEnv(n, seed=0, **ENV_KW)
     env.reset()
     d = env.device
     f32 = lambda x: torch.tensor(np.asarray(x), dtype=torch.float32, device=d)  # noqa: E731
     env.paths = f32(_resample_pose(F, env.path_steps))[None]
-    env.job = torch.zeros(1, dtype=torch.long, device=d)
+    env.job = torch.zeros(n, dtype=torch.long, device=d)
     env.job_gap = torch.tensor([gap], dtype=torch.long, device=d)
     env.gaps = f32(gaps_b)[None]
-    env.H, env.Tbb = f32(H)[None], f32(Tbb)[None]
+    env.H, env.Tbb = f32(H)[None].repeat(n, 1, 1), f32(Tbb)[None].repeat(n, 1, 1)
     env.pitch.fill_(env.pitch0); env.lean.fill_(env.lean0); env.yaw0.zero_()
     net = T.PointNetAC(env.pc_m, env.act_dim).to(d)
     net.load_state_dict(torch.load(ckpt, map_location=d, weights_only=True))
     net.w.fill_(0.0)
+    torch.manual_seed(0)
     obs = env._observe()
-    res = np.zeros((env.path_steps, 4))
-    info = {}
+    res = np.zeros((n, env.path_steps, 4))
+    t_end = np.full(n, env.path_steps - 1)
+    over = np.zeros(n, bool)
+    succ, fit, cham = np.zeros(n, bool), np.zeros(n), np.zeros(n)
     with torch.no_grad():
         for _ in range(env.steps - 1):
-            obs, _, done, info = env.step(net.deterministic(obs))
-            t = int(env.t[0])
-            res[t, :3] = env.residual[0, :3].cpu().numpy()
-            res[t, 3] = float(env.yaw0[0] + env.residual[0, 3])
-            if bool(done[0]):
+            dist, _ = net.dist_value(obs)
+            raw = dist.mean.clone()
+            raw[1:] = dist.sample()[1:]
+            obs, _, done, info = env.step(net.action_from_raw(obs, raw))
+            t = env.t.cpu().numpy()
+            live = ~over
+            r = env.residual.cpu().numpy()
+            y = (env.yaw0 + env.residual[:, 3]).cpu().numpy()
+            for i in np.flatnonzero(live):
+                ti = min(int(t[i]), env.path_steps - 1)
+                res[i, ti, :3] = r[i, :3]
+                res[i, ti, 3] = y[i]
+            dn = done.cpu().numpy().astype(bool) & live
+            if dn.any():
+                t_end[dn] = np.minimum(t[dn], env.path_steps - 1)
+                succ[dn] = info['success'].cpu().numpy()[dn]
+                fit[dn] = info['fit'].cpu().numpy()[dn]
+                cham[dn] = info['chamfer'].cpu().numpy()[dn]
+                over |= dn
+            if over.all():
                 break
-    t_end = int(env.t[0])
-    res[t_end + 1:] = res[t_end]                             # contact before the last knots: hold the last correction
+    ok = np.flatnonzero(succ)
+    k = 0 if succ[0] or not len(ok) else int(ok[np.argmin(cham[ok])])
+    res = res[k]
+    res[t_end[k] + 1:] = res[t_end[k]]                       # contact before the last knots: hold the last correction
     x_ok, y_ok, h_ok, a_ok, ang = env.criteria()
     _, _, _, bb, rx, yc, _ = env._geometry()
-    end = dict(kin_success=bool(info['success'][0]), fit=round(float(info['fit'][0]), 3),
-               disc_dist_mm=round(float(info['chamfer'][0]) * 1000, 1), angle_deg=round(math.degrees(float(ang[0])), 1),
-               bottom_x_mm=round(float(bb[0, 0] - rx[0]) * 1000, 1), bottom_y_mm=round(float(bb[0, 1] - yc[0]) * 1000, 1))
-    end_ok = dict(x=bool(x_ok[0]), y=bool(y_ok[0]), height=bool(h_ok[0]), lean_deg=math.degrees(float(env.lean[0])))
-    return res, float(env.zdown[0]), end, env.floor_z, env.tine_h, end_ok
+    end = dict(kin_success=bool(succ[k]), fit=round(float(fit[k]), 3), disc_dist_mm=round(float(cham[k]) * 1000, 1),
+               angle_deg=round(math.degrees(float(ang[k])), 1), bottom_x_mm=round(float(bb[k, 0] - rx[k]) * 1000, 1),
+               bottom_y_mm=round(float(bb[k, 1] - yc[k]) * 1000, 1))
+    if n > 1:
+        end.update(sample=k, seated_samples=f'{len(ok)}/{n}')
+    end_ok = dict(x=bool(x_ok[k]), y=bool(y_ok[k]), height=bool(h_ok[k]), lean_deg=math.degrees(float(env.lean[k])))
+    return res, float(env.zdown[k]), end, env.floor_z, env.tine_h, end_ok
 
 
 def main():
@@ -164,6 +189,8 @@ def main():
     a.add_argument('--max_step_deg', type=float, default=8.0, help='largest joint change between 2 mm knots')
     a.add_argument('--max_descent_mm', type=float, default=None, help='(11/02, opt-in) cap the extra descent after the path end '
                    '(the sim pushes to its floor; real 11/02 L8/R6: the push turned the plate in the hand)')
+    a.add_argument('--samples', type=int, default=1, help='(11/02, opt-in) roll out the deterministic policy plus '
+                   'sampled ones in parallel and keep a seated one (real 11/02 pin 12: the deterministic one did not seat)')
     a.add_argument('--yaw_trim', action='store_true', help='(11/02, opt-in) take the in-hand yaw the policy leaves (its 6 deg '
                    'face tolerance) out too: a turn about the basket vertical through the plate centre, ramped over the insert')
     a = a.parse_args()
@@ -184,7 +211,7 @@ def main():
     _, b0 = lowest_rim(F[-1], H, Tbb)                            # no correction: where the plate bottom would end
     uncorrected = dict(x_mm=round(float(b0[0] - gaps_b[gap][0]) * 1000, 1), y_mm=round(float(b0[1] - gaps_b[gap][1]) * 1000, 1),
                        face_turn_vs_job_deg=round(turned, 1))
-    res, zdown, end, floor_z, tine_h, end_ok = rollout(F, H, Tbb, gaps_b, gap, a.ckpt)
+    res, zdown, end, floor_z, tine_h, end_ok = rollout(F, H, Tbb, gaps_b, gap, a.ckpt, a.samples)
     # (11/02 real: refused at face angle 6.2 deg -> taught insert, L8/R6) with --yaw_trim a seat that only misses on the face
     # angle goes on: the trim takes the yaw part out and the angle is checked again after it
     near = a.yaw_trim and end_ok['x'] and end_ok['y'] and end_ok['height'] and end['angle_deg'] < 2 * ENV_KW['angle_tol_deg']

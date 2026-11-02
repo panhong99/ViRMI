@@ -157,6 +157,7 @@ def main():
     p.add_argument('--max_updates', type=int, default=1500)
     p.add_argument('--yaw', action='store_true', help='in-hand yaw +/- --yaw_deg and a yaw action')
     p.add_argument('--yaw_deg', type=float, default=10.0)
+    p.add_argument('--hang_deg', type=float, default=15.0, help='in-hand hang +/- (11/02 real grasps turned 35-44 deg vs the job)')
     # (Claude 10/30 oracle check) the defaults cap even a true-geometry controller at pc 26-41 %; these opt-ins
     # (extra descent to the floor, pitch range, hover above the slot) give P 35 % / oracle 64 % at 30 mm
     p.add_argument('--descend_extra_mm', type=float, default=40.0)
@@ -199,7 +200,8 @@ def main():
               target_x_mm=a.target_x_mm, phys_critic=a.phys_critic or None, phys_w=a.phys_w,
               lean_follow=a.lean_follow, angle_tol_deg=a.angle_tol_deg, freeze_in_tines=a.freeze_in_tines,
               speed_action=a.speed_action, pc_noise_mm=a.pc_noise_mm, pc_bias_mm=a.pc_bias_mm, pc_bias_deg=a.pc_bias_deg,
-              pc_random=a.pc_random, pc_occlude_deg=a.pc_occlude_deg, goal_bias_mm=a.goal_bias_mm, goal_bias_deg=a.goal_bias_deg)
+              pc_random=a.pc_random, pc_occlude_deg=a.pc_occlude_deg, goal_bias_mm=a.goal_bias_mm, goal_bias_deg=a.goal_bias_deg,
+              hang_deg=a.hang_deg)
     env = DockEnv(a.envs, seed=a.seed, **kw)
     net = PointNetAC(env.pc_m, env.act_dim).cuda()
     if a.init:

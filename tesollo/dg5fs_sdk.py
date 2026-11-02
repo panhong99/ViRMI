@@ -219,8 +219,9 @@ def auto_targets(obj):
     """[(quadrant, pin, why)] to try in order for 'basket' alone."""
     st = load_state()
     # (보스 10/29) a plate seen in the basket is an obstacle like a remembered one: the next plate goes behind it
-    placed = st['plates'] + [dict(q=q, pin=p_) for q, p_ in SEEN_PINS.items()
-                             if not any(r['q'] == q and abs(r['pin'] - p_) <= 2 for r in st['plates'])]
+    # (11/02 real: plate 1 remembered at Q3 pin 6 was also seen ~3+ pins off -> counted twice, plate 2 went to Q4) a quadrant
+    # with a remembered plate keeps the memory; seen pins count only where nothing is remembered (plates put in by hand)
+    placed = st['plates'] + [dict(q=q, pin=p_) for q, p_ in SEEN_PINS.items() if not any(r['q'] == q for r in st['plates'])]
     st = dict(st, plates=placed)
     plate_q = [p_['q'] for p_ in st['plates']]
     full = {q for q, v in SEEN.items() if v and not (v == 'plate' and q in SEEN_PINS)} | set(st['bowls'])

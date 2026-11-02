@@ -5,10 +5,20 @@
 
 ## 0. 기반 논문 (보스 지정)
 
-- https://openreview.net/pdf?id=YmJi0bTfeNX
-- https://openreview.net/pdf?id=_xFJuqBId8c
-- OpenReview 봇 확인 때문에 Claude는 PDF를 직접 읽지 못했다. 보스 설명은 "머그컵 걸기, 놓을 자세를 점군으로 구성"이다.
-- 그래서 RPDiff(CoRL 2023, Simeonov 외) 계열과 NDF·R-NDF·TAX-Pose 계열로 가정했다. **보스 확인 필요: 두 논문의 정확한 제목.**
+PDF 원문: `~/Downloads/371_tax_pose_task_specific_cross_p.pdf`, `~/Downloads/167_shelving_stacking_hanging_rela.pdf`
+(후속: `~/Downloads/Learning_Distributional_Demonstration_Spaces_for_Task-Specific_Cross-Pose_Estimation.pdf`, TAX-Pose-Mix, ICRA 2024).
+
+| | TAX-Pose (CoRL 2022, CMU Held 랩) [openreview YmJi0bTfeNX] | RPDiff (CoRL 2023, MIT·NVIDIA) [openreview _xFJuqBId8c] |
+|---|---|---|
+| 입력 | 분할된 두 물체 점군 (예: 머그, 걸이) | 분할된 물체 점군 + 장면 점군 |
+| 출력 | 두 물체 사이 "cross-pose" 1개 (soft correspondence + residual로 가상점까지) | 6-DoF 배치 자세 K개 (반복 디노이징, 다중 해) + 성공 분류기로 1개 선택 |
+| 목표 지정 | 작업마다 시연으로 관계를 학습. 언어 없음 | 작업마다 시연(시뮬 1k–3k개, 특권 정보 스크립트)으로 학습. 언어 없음. 실기에서는 **사람이 후보 중 하나를 골랐다** (A8.1) |
+| 실행 | 파지는 motion primitive, 이후 motion planner로 예측 자세까지 open-loop | 파지 샘플러 + IK + motion planner, open-loop |
+| 실기 | 머그 걸기: 실기 시연 10개로 학습, 학습 머그 62 %, 새 머그 54 % (20개 × 5회). 배치는 시뮬 학습 → 실기 | 책꽂이, 캔/캐비닛, 머그/걸이. 시뮬 학습 → 실기 직접 전이, 정량 수치 없음(영상) |
+| 저자가 적은 한계 | 분할 필요, 가림에 약함(완전 점군일 때 최선), 다중 해 정의 안 됨 | (7절, A8.2) ① **closed-loop 실행 정책 없음**, 교란에 약함 ② **삽입 전 경유 자세를 손으로 정함** → 경유점·전체 경로 예측이 필요 ③ **접촉·물리 고려 없음**: 머그 손잡이가 걸이를 살짝 빗나가는 실패 ④ sim2real 차이로 실기 성능 하락 ⑤ 사전학습 없이 작업마다 많은 시연 필요 ⑥ 얇은·반짝이는 물체는 깊이 카메라로 안 보임 |
+
+**RPDiff가 스스로 적은 한계 ①②③이 보스 아이디어(경로 생성, 끼울 때까지 고려, 실패 감지)와 그대로 겹친다.**
+⑥(가는 철사 핀)도 우리 바구니가 겪는 문제다. 우리 측면 카메라·고정 카메라 점군 사용으로 다룰 근거가 있다.
 
 ## 1. 보스 아이디어 (11/02 원문 요약)
 
@@ -82,3 +92,69 @@
 ## 5. 산출물
 - 티와리·마리코 토론 결과를 이 파일 아래 "## 6. 토론"에 적는다. 결정은 `collab/DECISIONS.md`에 이유와 함께 남긴다.
 - 보스 확인이 필요한 것은 "보스 확인 필요:" 줄로 표시한다.
+
+## 6. Codex 연구 갱신 및 비판적 재정리 (2026-11-02)
+
+### 6-1. 첨부 기반 논문 식별 및 원문 대조
+
+첨부 PDF의 첫 페이지와 본문을 확인했다. 처음의 "정확한 제목 확인 필요"는 해소됐다.
+
+| 첨부 파일 | 논문 | 이 논문이 이미 하는 일 | 연구 주장에 주는 제약 |
+|---|---|---|---|
+| `167_shelving_stacking_hanging_rela.pdf` | [RPDiff: Shelving, Stacking, Hanging: Relational Pose Diffusion for Multi-modal Rearrangement](https://arxiv.org/abs/2307.04751), CoRL 2023 | 점군에서 다중 최종 배치 변환을 생성하고 성공 분류기로 후보를 순위화한다. 실기에서는 IK·모션 플래너로 실행한다. | "배치 후보 선택"과 "경로를 모션 플래너에 넣기" 자체는 새롭지 않다. 한계는 후보 끝점의 정적 타당도와 실행 성공이 다르다는 점, 파지·이동 중 손 안 물체 움직임과 교란을 폐루프 제어하지 않는다는 점이다. 논문은 placement 실행용 강건한 폐루프 제어가 없음을 명시한다. |
+| `371_tax_pose_task_specific_cross_p.pdf` | [TAX-Pose: Task-Specific Cross-Pose Estimation for Robot Manipulation](https://arxiv.org/abs/2211.09325), CoRL 2022 | 두 물체 점군의 cross-object correspondence로 작업별 상대 pose를 추정하고 그 목표를 motion planner에 전달한다. 실기 일부 작업은 10회 시연으로 새 물체에 일반화했다. | "점군으로 상대 목표를 학습하고 경로 계획기에 넘긴다"도 선행됐다. 다만 기본 설정은 주어진 anchor에 대한 단일 cross-pose이며, 다양한 슬롯 모드와 실행 중 상태 추정은 연구 대상이 아니다. |
+
+### 6-2. 초안에서 바로잡을 점
+
+- **RPDiff가 후보 점수화를 하지 않는다는 식의 공백 주장은 틀리다.** 부록 A4는 성공 분류기로 후보를 고르고, A8은 이를 명시한다. 다만 이는 예측된 배치의 정적 점수이지, 실제 접촉 도중 관측되는 편차를 추적해 복구하는 정책은 아니다.
+- **AnyPlace는 배치만 화면에서 예측하고 실기 실행은 안 했다는 식의 구분도 틀리다.** [AnyPlace (CoRL 2025)](https://arxiv.org/abs/2502.04531)는 VLM이 위치 후보를 고르고, 지역 점군 모델이 정밀 배치 자세를 예측한다. 논문은 peg·vial 삽입, 컵 걸기, **접시를 여러 plate-rack 슬롯에 놓는 실기 시연**까지 보고한다. 따라서 “VLM이 대략 고르고 학습기가 정밀화”와 “식기 랙 슬롯 작업”만으로는 차별화되지 않는다. AnyPlace의 중심은 배치 성공/정밀도이며, 우리 가설은 파지 후 손 안 pose가 변한 상태를 관측하고 삽입 동안 갱신하는 데 둬야 한다.
+- **접시 슬롯 삽입 자체도 비어 있지 않다.** [Brahmbhatt et al., Zero-Shot Transfer of Haptics-Based Object Insertion Policies (ICRA 2023)](https://arxiv.org/abs/2301.12587)는 시뮬에서 학습한 접촉 활용 RL을 접시 슬롯에 실기 전이했고, 접시 크기·질량 일반화와 접촉 복구를 다뤘다. 후속 [Contact-Rich Object Insertion: Lessons for Zero-Shot Policy Transfer](https://openreview.net/pdf/44697cbcd63f075925fab2150bb3b3bc3d772432.pdf)은 삽입 중 시야 대신 wrench/proprioception 기반을 사용한다. 따라서 “접촉-aware RL” 또는 “접촉 실패 복구” 일반 주장은 신규성으로 삼기 어렵다. 남는 가설은 **시각 관측으로 손 안 plate–slot 상대 오차를 추정해 접촉 삽입을 닫는 것**이다. 다만 modality 차이만으로 신규성이 성립하지 않으며, 접촉 기반 정책과 직접 비교해야 한다.
+- **파지와 경로를 배치 뒤에 따로 붙이는 방식도 약하다.** [B4P (IROS 2025)](https://arxiv.org/abs/2504.04598)와 [Pick and Place Planning is Better than Pick Planning then Place Planning](https://arxiv.org/abs/2401.16585)는 grasp 선택이 목표 도달 경로와 배치 가능성에 영향을 주므로 함께 계획해야 한다고 보인다. 더 직접적으로, 2026-09 공개된 [Execution-Aware Pre-Execution Ranking for Grasp-Conditioned Robotic Placement](https://arxiv.org/abs/2609.19946)은 점군과 grasp–place 후보를 이용해 계획 성공 및 실행 성공을 사전 순위화한다. 이 최신 프리프린트는 **파지 조건부 후보 랭킹** 제안과 상당히 겹친다. 따라서 우리 기여를 사전 후보 순위화 하나로 잡지 말고, 실제 삽입 전후 관측 및 온라인 교정으로 명확히 분리해야 한다. 이 논문은 아직 프리프린트이며, 보고된 27개 잠금 사례 중 전체 end-to-end 성공은 13개라는 한계도 함께 읽어야 한다.
+- **failure detection도 기존에 없는 것으로 부르면 안 된다.** RPDiff의 성공 분류기는 삽입 전 후보 타당도를 평가하고, 접촉 RL은 상호작용 중 접촉·복구를 다룬다. 제안 가능한 더 좁은 목표는 "일반 실패 감지"가 아니라 **카메라에서 관찰 가능한 상대 pose/삽입 진척의 이상을 검출하고, 시각 보정이 유효한 실패와 재파지가 필요한 실패를 구분**하는 것이다.
+- 문서의 “접시 랙 슬롯 삽입 논문을 찾지 못했다”는 문장은 본 절에 의해 대체한다. 기존 이력 보존을 위해 초안 본문은 남기되, 조사 결론으로 인용하지 말 것.
+
+### 6-3. 범위를 좁힌 연구 질문
+
+> **초점 가설:** 파지 후 그리퍼 안에서 생긴 접시의 위치·방향 오차가 슬롯 삽입 성공을 좌우할 때, 제한된 시야의 점군/영상 관측으로 plate–slot 상대 오차를 추정하고 삽입 마지막 구간의 보정 동작을 반복 선택하면, 같은 grasp와 초기 접근 경로의 open-loop 실행보다 정확한 슬롯 안착률을 높일 수 있는가?
+
+이 질문에서 주요 기여 후보는 **관측-조건부 온라인 보정 알고리즘** 하나다. 언어 명령("식기 정리")을 대상·목표 슬롯 목록으로 바꾸는 VLM, 오브젝트 검출, 초기 grasp generator는 앞단 모듈로 둔다. 그 시스템 시연은 유용하지만 새 알고리즘 주장으로 세지 않는다. 접시+바구니에서 시작하고, 추가 사물/랙은 핵심 결과가 재현된 뒤 일반화 실험으로만 확장한다. 전역 point-cloud world model이나 VLA fine-tuning을 동시에 논문 기여로 얹지 않는다.
+
+이 framing은 성공을 전제하지 않는다. 현재 `RESEARCH_PLAN.md`와 `STATE_NOW.md`에서 기록한 접촉 해소 replay는 강제 pose 재생 17/64에 비해 wrench 추종 3/64였고, 제안한 경로도 3/64·4/64다. 즉 지금 정책 수치는 접촉을 실제로 이기는 증거가 아니다. 먼저 접촉 가능한 경로와 관측 가능성을 통과시켜야 한다. 기존 2026-11-02 연구계획의 outcome-only 격자 보정은 중요한 대안 기여지만, 시도 수가 적고 파지 산포를 줄이지 못하면 성공률 향상이 제한되므로 이 가설과 섞지 말고 별도 baseline/후속 갈래로 둔다.
+
+### 6-4. 실행 가능한 실험안
+
+| 단계 | 수행 | 비교 / 통과 판단 | 기록할 결과 |
+|---|---|---|---|
+| 0. 접촉 경로 gate | 현재 contact-valid sim gate를 유지한다. 그리퍼/plate/tine 형상과 마찰·질량은 실물 계측으로 보정하고, 강제 pose가 아닌 접촉 dynamics에서 접근 경로를 먼저 성립시킨다. | 같은 초기조건 묶음에서 엄격한 seated 기준을 충족하는 경로가 있어야 학습 정책 비교로 진행한다. 현재 계획의 ≥15/64는 파일에 있던 내부 gate이며, 대규모 성능 주장 기준은 아니다. | episode별 landed slot, pose 오차, peak wrench, 경로 오차, 접촉 횟수 |
+| 1. 관측 검증 | 고정 측면 카메라의 pair/슬롯 관측과 별도 카메라 또는 독립 판독의 최종 L/R을 대응시킨다. 손 안 dx/yaw를 통제된 범위에서 바꿔 관측 가능 범위를 측정한다. | 방향 부호·반복 오차를 먼저 고정한다. 같은 카메라 출력으로 입력과 성공 라벨을 만들지 않는다. 옆면 영상이 yaw를 실제 구분하지 못하면 yaw 추정 주장은 제거한다. | 관측 잔차, 프레임 지연, 가림률, 독립 라벨 일치도 |
+| 2. 최소 실기 인과 비교 | 고정 plate·rack·목표 슬롯에서 동일한 grasp/접근을 사용하고, trial 시작 시 물체를 손 안에서 작은 dx/yaw 만큼 통제해 흔든다. open-loop, 삽입 직전 1회 보정, 삽입 도중 반복 보정을 paired randomized 순서로 비교한다. | 주 지표는 정확한 L/R 슬롯 쌍 안착률. 보조는 중심 오차(slot 단위), 재시도 수, 시간, 접촉/충돌. 10 paired trial은 센서/효과크기 pilot만; paired 차이 SD를 얻은 뒤 α=.05, power .8에 맞춰 본 실험 수를 정한다. | plate 색과 trial/session을 분리 기록하고, 실패·모호 라벨을 임의 제외하지 않는다. |
+| 3. 알고리즘 비교 | 동일한 관측·초기경로에서 (a) open-loop trajectory, (b) 수작업 proportional correction, (c) 학습된 관측-조건부 correction을 비교한다. 고정 검증 grasp·장면·seed를 공유한다. | 정책이 간단한 수작업 보정보다 held-out grasp에서 좋아야 학습 기여를 주장한다. Contact-RL/haptic baseline은 observation/action budget을 맞출 수 있을 때 비교한다. | 성공률과 paired 신뢰구간, 분포 shift, 각 보정 단계의 성공/실패 전환 |
+| 4. 일반화 | 고정 조건 결과 후 새로운 grasp와 실측 범위의 in-hand perturbation으로 평가한다. 이후에만 흰/빨강 plate 또는 두 번째 receptacle을 추가한다. | 색상 두 장만으로 category generalization을 주장하지 않는다. 새 rack을 추가하지 못하면 일반화는 unseen grasp/perturbation으로 한정한다. | 조건별 성능, 센서 누락 시 안전 fallback |
+
+**필수 baseline/ablation:** (1) 고정 티칭 경로 open-loop, (2) 접촉 가능한 planner + 동일 open-loop 삽입, (3) 손으로 정한 1회 보정, (4) 제안 학습 보정, (5) 보정 관측 제거, (6) 삽입 중 관측을 직전 한 번으로 제한, (7) 실제 측정 오차 대비 깨끗한 시뮬 관측. AnyPlace/RPDiff는 초기 목표 pose 후보 생성 기준선으로 인용·비교하되, 목표 예측과 온라인 보정을 합쳐 평가하지 않는다.
+
+### 6-5. 제안 방법의 최소 형태와 world model 판단
+
+- 상태: (s_t=(P^{plate}_t, P^{slot}_t, hat{T}^{plate}_{gripper,t}, q_t, dot q_t, u_{t-1})). 손 안 상대 pose가 직접 보이지 않으면 관측 추정치와 uncertainty를 유지한다.
+- 행동: 마지막 구간의 작은 (SE(3)) 상대 보정 (Delta T_t) 또는 제한된 접촉 삽입 primitive 선택. 장거리 경로 생성은 먼저 기성 모션 플래너로 고정해 독립 변수를 줄인다.
+- 목표: 정확한 슬롯 쌍 안착, 깨짐/과도한 접촉 회피, 재파지 필요 상황 구분. 성공 확률 추정은 오프라인 후보 채점만이 아니라 **새 관측 후 행동을 바꿔 결과를 개선하는지**로 검증한다.
+- "world model"이라는 이름은 보류한다. 현재 필요한 것은 전 장면과 긴 행동 시퀀스를 예측하는 모델이 아니라, 삽입 근처 상대 기하·불확실성을 이용해 짧은 보정 행동을 고르는 방법이다. 단순 상태 추정+정책으로 충분한지 먼저 비교하고, 다음 상태 예측이 실제로 성능에 더할 때만 world-model 표현을 쓴다.
+- 실패 복구는 한 기여에 억지로 모두 넣지 않는다. 초기 버전은 (i) 계속 보정, (ii) 후퇴 후 재시도, (iii) 재파지/중단을 나누는 작은 상태 전이로 제한한다. 접시 낙하/카메라 관측 불가처럼 시각 교정으로 회복할 수 없는 경우는 안전 중단으로 처리한다.
+
+### 6-6. 신규성 위험 및 멈춤 조건
+
+- 가장 큰 중복 위험은 AnyPlace의 접시 슬롯 실기 배치, Brahmbhatt의 contact-rich plate insertion, 그리고 2026년 grasp-conditioned pre-execution ranking이다. 이 셋을 모두 related work에서 직접 비교하고, “배치 포즈 예측/접촉 정책/실행 전 후보 순위화”와 “파지 후 상태를 재관측해 시각 폐루프 교정”을 분리해 보일 것.
+- 새 학습기법 없이 pair_view 기반 비례 보정만 개선되면, 이를 학습 알고리즘 기여라고 쓰지 말 것. 실용 시스템 또는 응용 실험으로 낮추거나, 연구 질문을 outcome-only calibration(별도 제안)으로 재정의한다.
+- 측면 시점에서 손 안 오차가 관측되지 않거나, 접촉 dynamics를 맞춘 시뮬 경로가 성립하지 않거나, 학습 보정이 단순 비례 보정을 이기지 못하면 RL/VLA를 더 얹어 해결하려 하지 말고 기여 주장을 다시 좁힌다.
+
+### 6-7. 확인한 참고문헌
+
+- RPDiff: [arXiv:2307.04751](https://arxiv.org/abs/2307.04751), CoRL 2023.
+- TAX-Pose: [arXiv:2211.09325](https://arxiv.org/abs/2211.09325), CoRL 2022.
+- AnyPlace: [arXiv:2502.04531](https://arxiv.org/abs/2502.04531), CoRL 2025.
+- Contact-rich plate insertion: [Brahmbhatt et al., arXiv:2301.12587](https://arxiv.org/abs/2301.12587), ICRA 2023; [OpenReview PDF](https://openreview.net/pdf/44697cbcd63f075925fab2150bb3b3bc3d772432.pdf).
+- Joint grasp/placement/motion planning: [B4P, arXiv:2504.04598](https://arxiv.org/abs/2504.04598), IROS 2025; [Shanthi & Hermans, arXiv:2401.16585](https://arxiv.org/abs/2401.16585).
+- Grasp-conditioned execution ranking: [arXiv:2609.19946](https://arxiv.org/abs/2609.19946), 2026-09 preprint.
+- Language-conditioned placement: AnyPlace, 위 참조. 이는 거친 문장을 목표 위치로 잇는 시스템 선례다.
+
+**보스 확인 필요:** 이 연구를 “접시 슬롯 마지막 구간의 시각 폐루프 보정”으로 좁히는 데 동의하는가? 측면 카메라에서 plate–slot 상대 pose가 충분히 관측되는지, 두 번째 rack을 실험 범위에 넣을 수 있는지 확인 필요. 현재 문서는 제안이며, 실기 실행 지시는 아니다.

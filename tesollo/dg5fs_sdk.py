@@ -154,6 +154,7 @@ TAUGHT_PIVOT = ['model']    # (--taught_pivot, 보스 10/30) taught_plan.py --pi
 INHAND = [False]
 INHAND_YAW = [False]        # (--inhand_yaw, 보스 10/30) and re-plan the insert with the measured yaw taken out (taught_plan --yaw_corr)            # (--inhand_check, 보스 10/30) plate: stop at the lift top, fixed camera measures the plate in the hand
 POLICY = [None]             # (--policy_insert [CKPT], 보스 10/31) the point-cloud docking RL corrects the taught insert (policy_insert.py)
+POLICY_EXTRA = []           # (--policy_yaw_trim / --policy_max_descent_mm, 11/02) passed on to policy_insert.py
 TEACH = [False]             # (--teach, 보스 10/29) plate: the plan stops above the basket, the insert is taught by the pendant
 CONTACT = REPO / 'tesollo/grasp_contact.json'   # finger joints at the end of the last grasp per object (the pre-close target)
 TAUGHT = REPO / 'tesollo/taught_inserts.json'   # every taught insert: joints + basket pose + plate in the hand
@@ -430,7 +431,7 @@ def policy_replan(plan_path, quadrant, pin, meas, q_top):
     t0 = time.time()
     cmd = [str(PLAN_PY), str(REPO / 'tesollo/policy_insert.py'), '--plan', str(plan_path), '--quadrant', quadrant, '--pin', str(pin),
            '--q_top'] + [str(v) for v in q_top] + ['--normal_flange'] + [str(v) for v in meas['normal_flange']] \
-        + (['--basket', BASKET_JSON[0]] if BASKET_JSON[0] else []) + (['--ckpt', POLICY[0]] if POLICY[0] != 'default' else [])
+        + (['--basket', BASKET_JSON[0]] if BASKET_JSON[0] else []) + (['--ckpt', POLICY[0]] if POLICY[0] != 'default' else []) + POLICY_EXTRA
     try:
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=120, cwd=str(REPO))
     except subprocess.TimeoutExpired:
@@ -644,6 +645,10 @@ def main():
                    help='(보스 10/31, opt-in; with --inhand_check, taught plate) the point-cloud docking RL (v11, or CKPT) '
                    'corrects the taught insert from the lift top (tesollo/policy_insert.py); refused -> the taught insert. '
                    'Use without --slot_dx / --slot_dy / --inhand_yaw (the policy aims at the gap itself)')
+    p.add_argument('--policy_yaw_trim', action='store_true', help='(11/02, opt-in; with --policy_insert) also take out the '
+                   'in-hand yaw the policy leaves (real 11/02 L8/R6: ~5 deg left)')
+    p.add_argument('--policy_max_descent_mm', type=float, default=None, help='(11/02, opt-in; with --policy_insert) cap the '
+                   'extra descent after the path (sim: ~26 mm down to its floor) so the hand does not push the plate')
     p.add_argument('--inhand_check', action='store_true', help='(보스 10/30, opt-in) plate: stop at the lift top, the fixed '
                    'camera measures the plate in the hand (experiments/inhand/plate_inhand.py, read-only), then go on')
     p.add_argument('--stepwise', action='store_true', help='(old) post-grasp legs as before: plate stops 1 cm over the slot '
@@ -665,6 +670,8 @@ def main():
     POLICY[0] = a.policy_insert
     if POLICY[0] and (not a.inhand_check or a.inhand_yaw):
         sys.exit('--policy_insert needs --inhand_check (and not --inhand_yaw)')
+    POLICY_EXTRA[:] = (['--yaw_trim'] if a.policy_yaw_trim else []) \
+        + (['--max_descent_mm', str(a.policy_max_descent_mm)] if a.policy_max_descent_mm is not None else [])
     ARM_APPROACH[:] = ['above', 'down'] if a.approach_stop else ARM_APPROACH
     TEACH[0] = a.teach
     INSERT_VEL[0] = a.insert_vel

@@ -100,6 +100,13 @@ def measured_h(H_nom, normal_f, F_end, Tbb, centre_f=None):
     return H, float(np.degrees(ang))
 
 
+def end_yaw(T, H, Tbb):
+    """the plate face's turn about the basket vertical [deg] at flange pose T (0 = square to the rows, as plate_inhand at_slot)"""
+    nb = np.linalg.inv(Tbb)[:3, :3] @ T[:3, :3] @ H[:3, 2]
+    nb *= np.sign(nb[0]) or 1.0
+    return float(np.degrees(np.arctan2(nb[1], nb[0])))
+
+
 def rollout(F, H, Tbb, gaps_b, gap, ckpt):
     """the policy in the dock env on this path -> (residual per env knot (S,4), zdown [m], end metrics)"""
     import torch
@@ -154,6 +161,10 @@ def main():
     a.add_argument('--basket', default=str(HERE / 'demo_safe/basket_fixed.json'))
     a.add_argument('--ckpt', default=str(CKPT))
     a.add_argument('--max_step_deg', type=float, default=8.0, help='largest joint change between 2 mm knots')
+    a.add_argument('--max_descent_mm', type=float, default=None, help='(11/02, opt-in) cap the extra descent after the path end '
+                   '(the sim pushes to its floor; real 11/02 L8/R6: the push turned the plate in the hand)')
+    a.add_argument('--yaw_trim', action='store_true', help='(11/02, opt-in) take the in-hand yaw the policy leaves (its 6 deg '
+                   'face tolerance) out too: a turn about the basket vertical through the plate centre, ramped over the insert')
     a = a.parse_args()
     t0 = time.time()
     k = pp.Kinematics()
@@ -187,12 +198,20 @@ def main():
         C2[:3, :3] = R.from_rotvec(Tbb[:3, 2] * rr[i, 3]).as_matrix() @ R.from_rotvec(Tbb[:3, 1] * rr[i, 2]).as_matrix() @ C2[:3, :3]
         targets.append(C2 @ np.linalg.inv(H))
         h_centre.append((np.linalg.inv(Tbb) @ C2)[2, 3] - floor_z)
+    if a.max_descent_mm is not None:
+        zdown = min(zdown, a.max_descent_mm / 1000)
     n_down = int(math.ceil(zdown / 0.002 - 1e-6))
     for j in range(1, n_down + 1):                              # the extra descent after the path end (DockEnv zdown)
         T_ = targets[-1].copy()
         T_[:3, 3] -= Tbb[:3, 2] * min(0.002, zdown - 0.002 * (j - 1))
         targets.append(T_)
         h_centre.append(h_centre[-1] - min(0.002, zdown - 0.002 * (j - 1)))
+    yaw_left = end_yaw(targets[-1], H, Tbb)
+    trim = -yaw_left if a.yaw_trim else 0.0
+    for i in range(i_t2, len(targets)):                         # --yaw_trim: 0 at teach 2 -> all of it at the path end
+        C = targets[i] @ H
+        C[:3, :3] = R.from_rotvec(Tbb[:3, 2] * math.radians(trim) * min(1.0, (i - i_t2) / max(1, L - 1 - i_t2))).as_matrix() @ C[:3, :3]
+        targets[i] = C @ np.linalg.inv(H)
     # continuation IK, J4 as taught (10/30 --yaw_corr: a full IK flips J4 / J6 near J5 = 0); the plate is a disc, so the
     # centre (3) + the face normal (2) are the constraints and J1-J3, J5, J6 the unknowns
     from scipy.optimize import least_squares
@@ -250,6 +269,7 @@ def main():
                   max_correction=dict(x_mm=round(float(np.abs(rr[:, 0]).max()) * 1000, 1), y_mm=round(float(np.abs(rr[:, 1]).max()) * 1000, 1),
                                       pitch_deg=round(math.degrees(float(np.abs(rr[:, 2]).max())), 1),
                                       yaw_deg=round(math.degrees(float(np.abs(rr[:, 3]).max())), 1), extra_descent_mm=round(zdown * 1000, 1)),
+                  yaw_left_deg=round(yaw_left, 1), yaw_trim_deg=round(trim, 1),
                   joint_margin_deg=round(float(min((Q - lo).min(), (hi - Q).min())), 1), j5_min_abs_deg=round(float(np.abs(Q[:, 4]).min()), 1), j5_zero_crossings=j5_cross,
                   max_joint_step_deg=round(float(steps.max()), 2), lift_top_to_first_knot_deg=round(float(first_move), 1),
                   knots=dict(carry=len(carry), insert=len(ins), back=len(back)),

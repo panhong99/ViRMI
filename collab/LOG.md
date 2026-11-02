@@ -5867,3 +5867,4 @@ DockEnv opt-in을 더 넣어 P를 Isaac으로 쟀다(seed 51024, 1024개, 바구
 - 실시간 target 3 결과(PID 2526234, 시작 tick 61073620): raw mask centre 1.70/2.37 부근(두께 편향), target 기준 L/R **2.66/3.34**, delta **−0.67칸**, yaw 제안 **+4.0°**(프레임별 약 +3.6~+4.2°). 두 줄 폭과 mask source도 GUI에 표시한다. 로봇 명령에는 연결하지 않았다.
 - 검증: 두께 2.7칸의 비대칭 합성 silhouette에서 위/아래 centre delta −0.14칸 재현; `calibration/tests.py` **109 tests / OK**(exit 0, `/tmp/side_pair_midline_tests_20261102.log`).
 - 완료 커밋 `d673b6e`; GUI PID 2526234는 보스 확인 뒤 종료됨.
+- (12:1x) **v12**(v11 + 손 안 hang/yaw ±25°, 1000 업데이트, `outputs/dock_rl_20261030/pc_wide_v12/final.pt`) 끝. 운동학(넓은 분포) 성공 70 %(시작 69 %). 실측 손 안 측정 46개로 실행기 통과(시뮬 안착, `--yaw_trim --max_descent_mm 10`): **v11 27/46, v12 39/46**. 실기 성공률은 아님. 실기 쓰려면 `--policy_insert /home/pan/pan/6D_pose/outputs/dock_rl_20261030/pc_wide_v12/final.pt`. 지금 실기 주력은 GT 재생.

@@ -5863,3 +5863,6 @@ DockEnv opt-in을 더 넣어 P를 Isaac으로 쟀다(seed 51024, 1024개, 바구
 - 실시간 read-only GUI: PID 2520017, 시작 tick 61031638, 로그 `outputs/side_cam_pair_20261102/live.log`. 모든 gap은 회색 윤곽, 현재 선택 gap은 초록 `TARGET`, 실제 외곽선 교차점은 흰 `L/R CROSS`로 구분했다. 접시의 윗등 돌출은 판정에 쓰지 않고 두 빗살 줄 교차점만 쓴다. 현재 접시가 목표 band 근처에 없으면 `waiting for a plate`로 유지한다. 로봇·핸드·ROS 명령 없음.
 - 검증: `python -m py_compile experiments/side_cam/pair_view.py`; `calibration/tests.py` **109 tests / OK**(exit 0, `/tmp/side_pair_calibration_tests_20261102_rerun.log`).
 - 완료 커밋: `9a92aa2`.
+- (11:4x) 보스 확인: 실제 접시는 3번에 있으나 뒷등이 거의 4번까지 가림. 외곽 한쪽 대신 각 빗살 줄에서 mask 양 경계의 중점을 구하고, 접시 두께·뒷등이 만든 공통 위치 편향은 버린다. 절대 위치는 선택 target에 고정하고 위/아래 중심의 차이만 yaw로 변환한다. edge-on YOLOE 미검출에는 빨강 HSV mask와 빈 바구니 차영상(low-confidence gate)을 보조로 추가했다.
+- 실시간 target 3 결과(PID 2526234, 시작 tick 61073620): raw mask centre 1.70/2.37 부근(두께 편향), target 기준 L/R **2.66/3.34**, delta **−0.67칸**, yaw 제안 **+4.0°**(프레임별 약 +3.6~+4.2°). 두 줄 폭과 mask source도 GUI에 표시한다. 로봇 명령에는 연결하지 않았다.
+- 검증: 두께 2.7칸의 비대칭 합성 silhouette에서 위/아래 centre delta −0.14칸 재현; `calibration/tests.py` **109 tests / OK**(exit 0, `/tmp/side_pair_midline_tests_20261102.log`).

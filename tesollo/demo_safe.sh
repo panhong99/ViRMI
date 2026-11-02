@@ -15,8 +15,10 @@ FILES=(tesollo/dg5fs_sdk.py tesollo/taught_plan.py tesollo/basket_plan.py tesoll
        calibration/basket_vision.py)
 if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null && ! git diff --quiet "$TAG" -- "${FILES[@]}"; then
   echo "!! demo files changed since $TAG:"; git diff --stat "$TAG" -- "${FILES[@]}"
-  read -r -p "run anyway? yes / Enter = stop: " ans
-  [ "$ans" = yes ] || exit 1
+  if [ "${DEMO_SAFE_YES:-}" != 1 ]; then          # (11/02) tesollo/demo_plates.sh asked once for both plates
+    read -r -p "run anyway? yes / Enter = stop: " ans
+    [ "$ans" = yes ] || exit 1
+  fi
 fi
 exec ~/miniconda3/bin/python3 "$REPO/tesollo/dg5fs_sdk.py" \
   --object auto \

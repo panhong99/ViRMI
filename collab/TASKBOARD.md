@@ -6,7 +6,7 @@ Phase 2 작업판이다(10/20 보스 시작). Phase 1(10/22 시연까지)의 작
 ## 11/02 측면 카메라 pair residual (Codex)
 
 - **완료 조건**: 로봇 명령 없이 측면 Q3 영상에서 CNN 번호 빗살 두 줄과 YOLOE 접시 외곽선을 겹쳐 예상 L/R pair, 연속 pair 오차, 제한된 yaw residual을 GUI와 터미널에 표시한다. 불확실하면 `WAIT / LOW CONFIDENCE`로 보정값 사용을 막는다.
-- **상태**: 완료(`9a92aa2`, 두꺼운 접시 중심선 보정 커밋 예정). `experiments/side_cam/pair_view.py`; 외곽 양끝의 중점을 위·아래 줄마다 구하고 공통 두께 편향은 버린다. 현재 실제 3번 빨강 접시: target 기준 L/R 2.66/3.34, delta −0.67칸, yaw 제안 +4.0°. 실시간 read-only GUI PID 2526234.
+- **상태**: 완료(`9a92aa2`, 두꺼운 접시 중심선 `d673b6e`). `experiments/side_cam/pair_view.py`; 외곽 양끝의 중점을 위·아래 줄마다 구하고 공통 두께 편향은 버린다. 현재 실제 3번 빨강 접시: target 기준 L/R 2.66/3.34, delta −0.67칸, yaw 제안 +4.0°. read-only GUI 검증 후 종료됨.
 
 ## 목표 (보스 10/20)
 

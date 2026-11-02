@@ -350,6 +350,9 @@ def basket(obj, quadrant, pin, centre_h=None):
                     legs = legs[:i_leg + 1] + rest
             if meas and POLICY[0]:
                 rest = policy_replan(plan, quadrant, pin, meas, q_top)
+                if not rest and '--yaw_trim' in POLICY_EXTRA and TAUGHT_PIVOT[0] == 'slot':   # (11/02) refused: the
+                    print('   policy refused -> the --inhand_yaw re-plan', flush=True)        # 10/30 yaw re-plan
+                    rest = inhand_replan(obj, quadrant, pin, meas, q_top, first)
                 if rest:
                     legs = legs[:i_leg + 1] + rest
         i_leg += 1
@@ -646,7 +649,8 @@ def main():
                    'corrects the taught insert from the lift top (tesollo/policy_insert.py); refused -> the taught insert. '
                    'Use without --slot_dx / --slot_dy / --inhand_yaw (the policy aims at the gap itself)')
     p.add_argument('--policy_yaw_trim', action='store_true', help='(11/02, opt-in; with --policy_insert) also take out the '
-                   'in-hand yaw the policy leaves (real 11/02 L8/R6: ~5 deg left)')
+                   'in-hand yaw the policy leaves (real 11/02 L8/R6: ~5 deg left), accept a seat that only misses on the face angle, '
+                   'and when the policy is refused use the --inhand_yaw re-plan instead of the uncorrected taught insert')
     p.add_argument('--policy_max_descent_mm', type=float, default=None, help='(11/02, opt-in; with --policy_insert) cap the '
                    'extra descent after the path (sim: ~26 mm down to its floor) so the hand does not push the plate')
     p.add_argument('--inhand_check', action='store_true', help='(보스 10/30, opt-in) plate: stop at the lift top, the fixed '

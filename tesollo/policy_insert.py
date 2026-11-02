@@ -143,7 +143,8 @@ def rollout(F, H, Tbb, gaps_b, gap, ckpt):
     end = dict(kin_success=bool(info['success'][0]), fit=round(float(info['fit'][0]), 3),
                disc_dist_mm=round(float(info['chamfer'][0]) * 1000, 1), angle_deg=round(math.degrees(float(ang[0])), 1),
                bottom_x_mm=round(float(bb[0, 0] - rx[0]) * 1000, 1), bottom_y_mm=round(float(bb[0, 1] - yc[0]) * 1000, 1))
-    return res, float(env.zdown[0]), end, env.floor_z, env.tine_h
+    end_ok = dict(x=bool(x_ok[0]), y=bool(y_ok[0]), height=bool(h_ok[0]), lean_deg=math.degrees(float(env.lean[0])))
+    return res, float(env.zdown[0]), end, env.floor_z, env.tine_h, end_ok
 
 
 def main():
@@ -183,8 +184,11 @@ def main():
     _, b0 = lowest_rim(F[-1], H, Tbb)                            # no correction: where the plate bottom would end
     uncorrected = dict(x_mm=round(float(b0[0] - gaps_b[gap][0]) * 1000, 1), y_mm=round(float(b0[1] - gaps_b[gap][1]) * 1000, 1),
                        face_turn_vs_job_deg=round(turned, 1))
-    res, zdown, end, floor_z, tine_h = rollout(F, H, Tbb, gaps_b, gap, a.ckpt)
-    if not end['kin_success']:                                   # the policy itself does not get it in: keep the plan
+    res, zdown, end, floor_z, tine_h, end_ok = rollout(F, H, Tbb, gaps_b, gap, a.ckpt)
+    # (11/02 real: refused at face angle 6.2 deg -> taught insert, L8/R6) with --yaw_trim a seat that only misses on the face
+    # angle goes on: the trim takes the yaw part out and the angle is checked again after it
+    near = a.yaw_trim and end_ok['x'] and end_ok['y'] and end_ok['height'] and end['angle_deg'] < 2 * ENV_KW['angle_tol_deg']
+    if not end['kin_success'] and not near:                      # the policy itself does not get it in: keep the plan
         print(f'REFUSED: the policy does not seat it in the sim ({end})')
         sys.exit(2)
     # the corrections on every dense knot (as rl/hand_basket.py --dock_traj replays them)
@@ -212,6 +216,12 @@ def main():
         C = targets[i] @ H
         C[:3, :3] = R.from_rotvec(Tbb[:3, 2] * math.radians(trim) * min(1.0, (i - i_t2) / max(1, L - 1 - i_t2))).as_matrix() @ C[:3, :3]
         targets[i] = C @ np.linalg.inv(H)
+    nb = np.linalg.inv(Tbb)[:3, :3] @ targets[-1][:3, :3] @ H[:3, 2]
+    lean = math.radians(end_ok['lean_deg'])
+    face_deg = math.degrees(math.acos(min(1.0, abs(nb @ np.r_[math.cos(lean), 0.0, math.sin(lean)]))))
+    if not end['kin_success'] and face_deg >= ENV_KW['angle_tol_deg']:
+        print(f'REFUSED: the face is still {face_deg:.1f} deg off after the yaw trim ({end})')
+        sys.exit(2)
     # continuation IK, J4 as taught (10/30 --yaw_corr: a full IK flips J4 / J6 near J5 = 0); the plate is a disc, so the
     # centre (3) + the face normal (2) are the constraints and J1-J3, J5, J6 the unknowns
     from scipy.optimize import least_squares
@@ -269,7 +279,8 @@ def main():
                   max_correction=dict(x_mm=round(float(np.abs(rr[:, 0]).max()) * 1000, 1), y_mm=round(float(np.abs(rr[:, 1]).max()) * 1000, 1),
                                       pitch_deg=round(math.degrees(float(np.abs(rr[:, 2]).max())), 1),
                                       yaw_deg=round(math.degrees(float(np.abs(rr[:, 3]).max())), 1), extra_descent_mm=round(zdown * 1000, 1)),
-                  yaw_left_deg=round(yaw_left, 1), yaw_trim_deg=round(trim, 1),
+                  yaw_left_deg=round(yaw_left, 1), yaw_trim_deg=round(trim, 1), face_after_trim_deg=round(face_deg, 1),
+                  accepted_on_trim=bool(not end['kin_success']),
                   joint_margin_deg=round(float(min((Q - lo).min(), (hi - Q).min())), 1), j5_min_abs_deg=round(float(np.abs(Q[:, 4]).min()), 1), j5_zero_crossings=j5_cross,
                   max_joint_step_deg=round(float(steps.max()), 2), lift_top_to_first_knot_deg=round(float(first_move), 1),
                   knots=dict(carry=len(carry), insert=len(ins), back=len(back)),

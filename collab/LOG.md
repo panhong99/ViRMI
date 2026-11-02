@@ -5830,3 +5830,11 @@ DockEnv opt-in을 더 넣어 P를 Isaac으로 쟀다(seed 51024, 1024개, 바구
 - 오프라인(10/30 실측 21개, 계획 Q3 pin 6, wrist_less 25, pivot slot): **12개 통과**(시뮬 안착 1.4–5.5 mm, 관절 2 mm당 ≤4.5°, URDF 여유 50°, 2.6 s), 9개 거부(손 안 yaw ≥22° 등 시뮬 실패). 통과 시 보정 x ~36 mm, y ~33 mm, 피치 ~11°, yaw ~17°, 추가 하강 ~26 mm. 경유점 경로 오차 삽입 2.1 mm.
 - J5: 티칭 경로 자체가 −8.6°(특이점 근처). J4 고정이면 J5가 0을 지나도 J4/J6 뒤집힘 없음(관절 점프 검사로 확인).
 - **월요일 실행(보스)**: `bash /home/pan/pan/6D_pose/tesollo/demo_safe.sh --taught_pivot slot --inhand_check --policy_insert --new_demo` (demo 파일 변경 질문에 `yes`; 처음엔 `--leg_enter`를 더해 다리마다 확인 권장). 로그 `outputs/policy_insert/*.json`.
+
+## 2026-11-02 10:0x Claude — 실기 `--policy_insert` 1회: Q3 pin 6 → L8/R6
+- 보스: "학습을 하니까 조금 유연하게 진행. 나쁘지 않은데 조금 더 수정". 측정 `outputs/inhand_20261030/20261102_094356.json`(yaw 17°, 면 기울기 −13°, job 대비 39° — 10/30보다 큼), 실행기 로그 `outputs/policy_insert/20261102_094359.json`.
+- 오프라인 재현(같은 입력 → 실기 계획과 관절 동일). 계획 끝 예측(최저점 경첩 모델): L5.9/R5.4, yaw 5.4° 남김(정책 각도 허용 6° 안), 추가 하강 26 mm(시뮬 바닥까지 누름).
+- 예측 vs 실기 4회(경첩 모델, 핀 단위): 10/30 11:37 (+0.5,+1.0), 13:19 (+2.5,+2.4), 13:26 (+1.4,+2.3), 11/02 정책 (−2.1,−0.6). 정책 실행만 반대 방향 → 추정: 바닥까지 누르는 26 mm에 손 안에서 접시가 돌았음. 손 안 위치 모델 오차 ±2칸이 주된 한계.
+- 수정(opt-in, 6e212d5): `--policy_yaw_trim`(남은 yaw를 삽입 구간에 걸쳐 0으로), `--policy_max_descent_mm`(추가 하강 상한). 기본값 재현 동일, 과거 측정 22개 통과 12개 그대로.
+- 09:48 두 번째 측정(yaw 25°, 면 −20°)은 정책 거부 → 티칭 경로로 감.
+- 다음 실기(보스): `bash /home/pan/pan/6D_pose/tesollo/demo_safe.sh --taught_pivot slot --inhand_check --policy_insert --policy_yaw_trim --policy_max_descent_mm 10 --new_demo --leg_enter`

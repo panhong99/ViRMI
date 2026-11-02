@@ -47,6 +47,30 @@ def parse():
                    'with velocities (contacts resolved) instead of writing the pose every step (the dish is 2.5 cm deep: '
                    'a forced pose runs it through the tines and the release depenetration decides the result)')
     p.add_argument('--compliant_tau', type=float, default=0.05, help='--compliant: time constant [s]')
+    p.add_argument('--wrench_max_n', type=float, default=None,
+                   help='opt-in force-limited pose tracking; caps translational PD force [N], with gravity compensation outside the cap')
+    p.add_argument('--wrench_tau_ratio', type=float, default=0.13,
+                   help='--wrench_max_n: torque cap = force cap times this lever arm [m]')
+    p.add_argument('--wrench_bandwidth_hz', type=float, default=12.0,
+                   help='--wrench_max_n: critically damped translational/rotational PD bandwidth [Hz]')
+    p.add_argument('--wrench_rot_bandwidth_hz', type=float, default=12.5,
+                   help='--wrench_max_n: critically damped angular PD bandwidth [Hz]')
+    p.add_argument('--wrench_lever_m', type=float, default=0.13,
+                   help='--wrench_max_n: replay arc length = translation + this lever x rotation angle [m]; 0 = translation only')
+    p.add_argument('--wrench_terminal_dx_mm', type=float, default=0.0,
+                   help='--wrench_max_n: basket-frame x correction at path end, ramped over terminal_blend_mm')
+    p.add_argument('--wrench_terminal_pitch_deg', type=float, default=0.0,
+                   help='--wrench_max_n: basket-frame y rotation at path end, ramped over terminal_blend_mm')
+    p.add_argument('--wrench_terminal_blend_mm', type=float, default=60.0,
+                   help='--wrench_max_n: arc-length distance over which terminal pose correction is ramped')
+    p.add_argument('--wrench_hover_mm', type=float, default=0.0,
+                   help='--wrench_max_n: pause this arc distance before endpoint, then traverse it at final_speed')
+    p.add_argument('--wrench_hover_s', type=float, default=0.5,
+                   help='--wrench_max_n: hold duration at the hover pose [s]')
+    p.add_argument('--wrench_final_speed', type=float, default=0.02,
+                   help='--wrench_max_n: speed through final hover_mm [m/s]')
+    p.add_argument('--wrench_free_space_test', action='store_true',
+                   help='diagnostic only: move the basket away so tracking error is measured without contact')
     p.add_argument('--settle_s', type=float, default=2.0)
     p.add_argument('--out', default='')
     p.add_argument('--seed', type=int, default=0)
@@ -142,12 +166,36 @@ def main():
     sim = sim_utils.SimulationContext(sim_utils.SimulationCfg(dt=dt, device='cuda:0'))
     scene = InteractiveScene(SceneType(num_envs=N, env_spacing=2.0))
     sim.reset()
+    if a.wrench_free_space_test:
+        # This diagnostic intentionally invalidates landing metrics: retain the
+        # programmed trajectories, but remove basket contact from the tracking test.
+        basket_pose = scene['basket'].data.root_state_w[:, :7].clone()
+        basket_pose[:, 2] += 10.0
+        scene['basket'].write_root_pose_to_sim(basket_pose)
+        scene.write_data_to_sim()
+        sim.step(render=False)
+        scene.update(dt=1 / 120)
     if a.viewer and a.viewer_cam:
         org0 = scene.env_origins.cpu().numpy()
         tgt = (org0.mean(0) if a.viewer_all else org0[0]) + Tbb[:3, 3]
         sim.set_camera_view(eye=(tgt + np.asarray(a.viewer_cam)).tolist(), target=tgt.tolist())
     dev = sim.device
     plate = scene['plate']
+    if a.wrench_max_n is not None and a.wrench_max_n < 0:
+        raise SystemExit('--wrench_max_n must be nonnegative')
+    if a.wrench_tau_ratio <= 0:
+        raise SystemExit('--wrench_tau_ratio must be positive')
+    if a.wrench_bandwidth_hz <= 0:
+        raise SystemExit('--wrench_bandwidth_hz must be positive')
+    if a.wrench_rot_bandwidth_hz <= 0:
+        raise SystemExit('--wrench_rot_bandwidth_hz must be positive')
+    if a.wrench_terminal_blend_mm < 0 or a.wrench_hover_mm < 0 or a.wrench_hover_s < 0 or a.wrench_final_speed <= 0:
+        raise SystemExit('wrench terminal/hover distances and duration must be nonnegative; final speed must be positive')
+    wrench_pd_max = torch.zeros(N, device=dev) if a.wrench_max_n is not None else None
+    wrench_tau_pd_max = torch.zeros(N, device=dev) if a.wrench_max_n is not None else None
+    wrench_pos_err_max = torch.zeros(N, device=dev) if a.wrench_max_n is not None else None
+    wrench_rot_err_max = torch.zeros(N, device=dev) if a.wrench_max_n is not None else None
+    wrench_pos_argmax_step = torch.zeros(N, dtype=torch.long, device=dev) if a.wrench_max_n is not None else None
     robot = scene['robot'] if a.hand else None
     hand_sensors = [scene[f'hand_contact_{b}'] for b in hand_bodies] if a.hand else []
     org = scene.env_origins.cpu().numpy()
@@ -221,6 +269,46 @@ def main():
             poses[e, :, 3:] = np.c_[qx[:, 3], qx[:, :3]]
         poses_t = torch.tensor(poses, dtype=torch.float32, device=dev)
         lens = torch.tensor([len(flange[j]) + int(n_extra[e]) for e, j in enumerate(job_of)], device=dev)
+        if a.wrench_max_n is not None:
+            if a.wrench_terminal_dx_mm or a.wrench_terminal_pitch_deg:
+                blend_m = max(a.wrench_terminal_blend_mm / 1000.0, 1e-9)
+                for e in range(N):
+                    m = int(lens[e].item())
+                    qq = poses[e, :m, 3:]
+                    dots = np.abs((qq[1:] * qq[:-1]).sum(1)).clip(0, 1)
+                    ds = np.linalg.norm(np.diff(poses[e, :m, :3], axis=0), axis=1)
+                    ds += max(a.wrench_lever_m, 0.0) * 2 * np.arccos(dots)
+                    s_local = np.r_[0.0, np.cumsum(ds)]
+                    alpha_local = np.clip((s_local - max(s_local[-1] - blend_m, 0.0)) / blend_m, 0.0, 1.0)
+                    for k, alpha_k in enumerate(alpha_local):
+                        poses[e, k, :3] += Tbb[:3, 0] * (a.wrench_terminal_dx_mm / 1000.0 * alpha_k)
+                        if a.wrench_terminal_pitch_deg:
+                            dR = R.from_rotvec(Tbb[:3, 1] * math.radians(a.wrench_terminal_pitch_deg * alpha_k)).as_matrix()
+                            q_wxyz = poses[e, k, 3:]
+                            R_now = R.from_quat([q_wxyz[1], q_wxyz[2], q_wxyz[3], q_wxyz[0]]).as_matrix()
+                            q_new = R.from_matrix(dR @ R_now).as_quat()
+                            poses[e, k, 3:] = [q_new[3], q_new[0], q_new[1], q_new[2]]
+                poses_t = torch.tensor(poses, dtype=torch.float32, device=dev)
+            # The source spline is not uniformly sampled. Parameterize replay by
+            # cumulative Cartesian arc length so its reference speed is bounded.
+            path_s = []
+            for e in range(N):
+                m = int(lens[e].item())
+                ds = np.linalg.norm(np.diff(poses[e, :m, :3], axis=0), axis=1)
+                if a.wrench_lever_m > 0:   # rotation counts as arc length (angle x lever): bounds the reference angular rate
+                    qq = poses[e, :m, 3:]
+                    dots = np.abs((qq[1:] * qq[:-1]).sum(1)).clip(0, 1)
+                    ds = ds + a.wrench_lever_m * 2 * np.arccos(dots)
+                path_s.append(np.r_[0.0, np.cumsum(ds)])
+            if a.wrench_hover_mm > 0:
+                hover_m = a.wrench_hover_mm / 1000.0
+                durations = []
+                for s in path_s:
+                    d_hover = max(s[-1] - hover_m, 0.0)
+                    durations.append(d_hover / a.speed + a.wrench_hover_s + (s[-1] - d_hover) / a.wrench_final_speed)
+                n_move = int(math.ceil(max(durations) / dt))
+            else:
+                n_move = int(math.ceil(max(s[-1] for s in path_s) / a.speed / dt))
         zero = torch.zeros(N, 6, device=dev)
         hand_hit = torch.zeros(N, dtype=torch.bool, device=dev)
         hand_max_force = torch.zeros(N, device=dev)
@@ -255,10 +343,133 @@ def main():
                             deepest = max(deepest, float(np.maximum(0.0, -sep[int(s):int(s + c)]).max()))
                     hand_max_pen[e] = max(float(hand_max_pen[e]), deepest)
         for t in range(n_move + 30):
-            i = torch.clamp((torch.tensor(t * a.speed * dt, device=dev) / torch.tensor(step[job_of], device=dev)).long(),
-                            max=lens - 1)
-            tgt = poses_t[torch.arange(N, device=dev), i]
-            if not a.compliant or t == 0:
+            if a.wrench_max_n is not None:
+                elapsed = t * dt
+                if a.wrench_hover_mm > 0:
+                    hover_m = a.wrench_hover_mm / 1000.0
+                    d_hover_np = np.array([max(s[-1] - hover_m, 0.0) for s in path_s])
+                    travel_np = d_hover_np / a.speed
+                    dist = np.where(elapsed < travel_np, elapsed * a.speed,
+                                    np.where(elapsed < travel_np + a.wrench_hover_s, d_hover_np,
+                                             d_hover_np + (elapsed - travel_np - a.wrench_hover_s) * a.wrench_final_speed))
+                    dist = np.array([min(float(d), s[-1]) for d, s in zip(dist, path_s)])
+                    speed_des_np = np.where(elapsed < travel_np, a.speed,
+                                            np.where(elapsed < travel_np + a.wrench_hover_s, 0.0, a.wrench_final_speed))
+                else:
+                    dist = t * a.speed * dt
+                    speed_des_np = np.full(N, a.speed)
+                dist_np = np.broadcast_to(dist, (N,))
+                i_np = np.array([min(max(int(np.searchsorted(s, dist, side='right') - 1), 0), len(s) - 1)
+                                 for s, dist in zip(path_s, dist_np)], dtype=np.int64)
+                j_np = np.array([min(k + 1, len(s) - 1) for k, s in zip(i_np, path_s)], dtype=np.int64)
+                a_np = np.array([(d - s[k]) / max(s[j] - s[k], 1e-9) if j > k else 0.0
+                                 for d, k, j, s in zip(dist_np, i_np, j_np, path_s)], dtype=np.float32).clip(0.0, 1.0)
+                i = torch.as_tensor(i_np, dtype=torch.long, device=dev)
+                j = torch.as_tensor(j_np, dtype=torch.long, device=dev)
+                alpha = torch.as_tensor(a_np, dtype=torch.float32, device=dev)[:, None]
+                p0 = poses_t[torch.arange(N, device=dev), i]
+                p1 = poses_t[torch.arange(N, device=dev), j]
+                q1 = p1[:, 3:] * torch.where((p0[:, 3:] * p1[:, 3:]).sum(1, keepdim=True) < 0, -1.0, 1.0)
+                seg_len_np = np.array([s[b] - s[a_] for a_, b, s in zip(i_np, j_np, path_s)], dtype=np.float32)
+                moving = torch.as_tensor((j_np > i_np), device=dev)[:, None]
+                seg_len = torch.as_tensor(seg_len_np, device=dev).clamp_min(1e-9)
+                speed_des = torch.as_tensor(speed_des_np, dtype=torch.float32, device=dev)[:, None]
+                vel_des = (p1[:, :3] - p0[:, :3]) / seg_len[:, None] * speed_des
+                vel_des = torch.where(moving, vel_des, torch.zeros_like(vel_des))
+                q0_conj = p0[:, 3:] * torch.tensor([1.0, -1.0, -1.0, -1.0], device=dev)
+                w1, x1, y1, z1 = q1.unbind(1)
+                w2, x2, y2, z2 = q0_conj.unbind(1)
+                qrel = torch.stack((w1*w2 - x1*x2 - y1*y2 - z1*z2,
+                                    w1*x2 + x1*w2 + y1*z2 - z1*y2,
+                                    w1*y2 - x1*z2 + y1*w2 + z1*x2,
+                                    w1*z2 + x1*y2 - y1*x2 + z1*w2), 1)
+                qrel = qrel * torch.where(qrel[:, :1] < 0, -1.0, 1.0)
+                qrel_norm = torch.linalg.vector_norm(qrel[:, 1:], dim=1, keepdim=True).clamp_min(1e-9)
+                omega_des = 2 * torch.atan2(qrel_norm, qrel[:, :1]) * qrel[:, 1:] / qrel_norm
+                omega_des = omega_des / seg_len[:, None] * speed_des
+                omega_des = torch.where(moving, omega_des, torch.zeros_like(omega_des))
+                q = p0[:, 3:] * (1 - alpha) + q1 * alpha
+                q = q / torch.linalg.vector_norm(q, dim=1, keepdim=True).clamp_min(1e-9)
+                tgt = torch.cat((p0[:, :3] * (1 - alpha) + p1[:, :3] * alpha, q), dim=1)
+            else:
+                i = torch.clamp((torch.tensor(t * a.speed * dt, device=dev) / torch.tensor(step[job_of], device=dev)).long(),
+                                max=lens - 1)
+                tgt = poses_t[torch.arange(N, device=dev), i]
+            if a.wrench_max_n is not None and t == 0:
+                # Match the other replay modes: initialize at the first commanded
+                # pose, then use dynamics for all subsequent path tracking.
+                plate.write_root_pose_to_sim(tgt)
+                plate.write_root_velocity_to_sim(zero)
+            elif a.wrench_max_n is not None:
+                # Critically damped Cartesian PD tracking. Gravity compensation is
+                # deliberately outside the requested PD force cap.
+                cur_p, cur_q = plate.data.root_pos_w, plate.data.root_quat_w  # root pose; quaternion wxyz
+                cur_vw = plate.data.root_com_vel_w
+                qt, qc = tgt[:, 3:], cur_q
+                qc_conj = qc * torch.tensor([1.0, -1.0, -1.0, -1.0], device=dev)
+                w1, x1, y1, z1 = qt.unbind(1)
+                w2, x2, y2, z2 = qc_conj.unbind(1)
+                qe = torch.stack((w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+                                  w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+                                  w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+                                  w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2), 1)
+                qe = qe * torch.where(qe[:, :1] < 0, -1.0, 1.0)
+                qv_norm = torch.linalg.vector_norm(qe[:, 1:], dim=1, keepdim=True).clamp_min(1e-9)
+                rotvec = 2 * torch.atan2(qv_norm, qe[:, :1]) * qe[:, 1:] / qv_norm
+                # The wrench acts at the COM. Track the desired COM (not merely
+                # the actor origin) when the USD has a nonzero local COM offset.
+                com_off_b = plate.data.body_com_pose_b[:, 0, :3]
+                qtw, qtx, qty, qtz = qt.unbind(1)
+                qtv = torch.stack((qtx, qty, qtz), 1)
+                twice_cross = 2 * torch.cross(qtv, com_off_b, dim=1)
+                com_off_w = com_off_b + qtw[:, None] * twice_cross + torch.cross(qtv, twice_cross, dim=1)
+                ep = (tgt[:, :3] + com_off_w) - plate.data.root_com_pos_w
+                wn = 2 * math.pi * a.wrench_bandwidth_hz
+                kp = wn ** 2
+                kd = 2 * wn
+                wn_rot = 2 * math.pi * a.wrench_rot_bandwidth_hz
+                kp_rot = wn_rot ** 2
+                kd_rot = 2 * wn_rot
+                mass = plate.data.default_mass[:, 0].to(dev).clamp_min(1e-6)
+                force_pd = mass[:, None] * (kp * ep + kd * (vel_des - cur_vw[:, :3]))
+                fnorm = torch.linalg.vector_norm(force_pd, dim=1, keepdim=True)
+                force_pd = force_pd * torch.clamp(a.wrench_max_n / fnorm.clamp_min(1e-9), max=1.0)
+                inertia_b = plate.data.default_inertia.to(dev).reshape(N, 3, 3)
+                rot_wb = torch.zeros((N, 3, 3), device=dev)
+                # Quaternion wxyz to rotation matrix (world from body).
+                qw, qx, qy, qz = cur_q.unbind(1)
+                rot_wb[:, 0, 0] = 1 - 2 * (qy*qy + qz*qz)
+                rot_wb[:, 0, 1] = 2 * (qx*qy - qz*qw)
+                rot_wb[:, 0, 2] = 2 * (qx*qz + qy*qw)
+                rot_wb[:, 1, 0] = 2 * (qx*qy + qz*qw)
+                rot_wb[:, 1, 1] = 1 - 2 * (qx*qx + qz*qz)
+                rot_wb[:, 1, 2] = 2 * (qy*qz - qx*qw)
+                rot_wb[:, 2, 0] = 2 * (qx*qz - qy*qw)
+                rot_wb[:, 2, 1] = 2 * (qy*qz + qx*qw)
+                rot_wb[:, 2, 2] = 1 - 2 * (qx*qx + qy*qy)
+                inertia_w = rot_wb @ inertia_b @ rot_wb.transpose(1, 2)
+                omega = cur_vw[:, 3:]
+                torque_pd = torch.bmm(inertia_w, (kp_rot * rotvec + kd_rot * (omega_des - omega)).unsqueeze(-1)).squeeze(-1)
+                torque_cap = a.wrench_max_n * a.wrench_tau_ratio
+                tnorm = torch.linalg.vector_norm(torque_pd, dim=1, keepdim=True)
+                torque_pd = torque_pd * torch.clamp(torque_cap / tnorm.clamp_min(1e-9), max=1.0)
+                gravity = torch.tensor(sim.cfg.gravity, device=dev, dtype=torch.float32).expand_as(force_pd)
+                force_world = force_pd - mass[:, None] * gravity
+                plate.permanent_wrench_composer.set_forces_and_torques(
+                    force_world[:, None, :], torque_pd[:, None, :], is_global=True)
+                wrench_pd_max[:] = torch.maximum(wrench_pd_max, torch.linalg.vector_norm(force_pd, dim=1))
+                wrench_tau_pd_max[:] = torch.maximum(wrench_tau_pd_max, torch.linalg.vector_norm(torque_pd, dim=1))
+                pos_err_now = torch.linalg.vector_norm(ep, dim=1)
+                new_pos_max = pos_err_now > wrench_pos_err_max
+                wrench_pos_err_max[:] = torch.maximum(wrench_pos_err_max, pos_err_now)
+                wrench_pos_argmax_step[new_pos_max] = t
+                wrench_rot_err_max[:] = torch.maximum(wrench_rot_err_max, torch.linalg.vector_norm(rotvec, dim=1))
+                if os.environ.get('WRENCH_DEBUG') and t % 20 == 0 and t > 0:
+                    rn = torch.rad2deg(torch.linalg.vector_norm(rotvec, dim=1))
+                    e_ = int(rn.argmax())
+                    print(f'  wrench t {t}: worst env {e_} rot err {rn[e_]:.2f} deg, |omega_des| {omega_des[e_].norm():.3f}, '
+                          f'|omega| {omega[e_].norm():.3f} rad/s, seg_len {seg_len[e_]*1000:.3f} mm, alpha {alpha[e_,0]:.2f}, idx {int(i[e_])}/{int(lens[e_])}', flush=True)
+            elif not a.compliant or t == 0:
                 plate.write_root_pose_to_sim(tgt)
                 plate.write_root_velocity_to_sim(zero)
             else:
@@ -289,6 +500,10 @@ def main():
             sim.step(render=a.viewer)
             scene.update(dt)
             measure_hand_contact()
+        if a.wrench_max_n is not None:
+            # Disable tracking before the free release/settling phase.
+            zeros = torch.zeros((N, 1, 3), device=dev)
+            plate.permanent_wrench_composer.set_forces_and_torques(zeros, zeros, is_global=True)
         if a.hand:
             # Release outcome stays comparable with the plate-only baseline: after
             # measuring insertion clearance, move the hand back to its default pose.
@@ -339,6 +554,11 @@ def main():
         rollout.hand_hit = hand_hit.cpu().numpy()
         rollout.hand_max_force = hand_max_force.cpu().numpy()
         rollout.hand_max_pen = hand_max_pen.cpu().numpy()
+        rollout.wrench_pd_max = wrench_pd_max.cpu().numpy() if wrench_pd_max is not None else None
+        rollout.wrench_tau_pd_max = wrench_tau_pd_max.cpu().numpy() if wrench_tau_pd_max is not None else None
+        rollout.wrench_pos_err_max = wrench_pos_err_max.cpu().numpy() if wrench_pos_err_max is not None else None
+        rollout.wrench_rot_err_max = wrench_rot_err_max.cpu().numpy() if wrench_rot_err_max is not None else None
+        rollout.wrench_pos_argmax_step = wrench_pos_argmax_step.cpu().numpy() if wrench_pos_argmax_step is not None else None
         return ok, landed
 
     t0 = time.time()
@@ -384,6 +604,14 @@ def main():
                    hand_max_penetration_mm=float(rollout.hand_max_pen.max() * 1000) if a.hand else None,
                    hand_pose=('plate_pre9 + 7 deg on each finger flexion joint_2' if a.hand else None),
                    samples=samples, args=vars(a))
+        if wrench_pd_max is not None:
+            out['wrench_tracking'] = dict(
+                max_pd_force_n=float(rollout.wrench_pd_max.max()),
+                max_pd_torque_nm=float(rollout.wrench_tau_pd_max.max()),
+                max_position_error_mm=float(rollout.wrench_pos_err_max.max() * 1000),
+                max_angle_error_deg=float(np.degrees(rollout.wrench_rot_err_max.max())),
+                max_position_error_env=int(rollout.wrench_pos_err_max.argmax()),
+                max_position_error_step=int(rollout.wrench_pos_argmax_step[rollout.wrench_pos_err_max.argmax()]))
         if dock is not None:                                   # (Claude 10/29) per env, to match kinematic vs physics
             out['dock_samples'] = [dict(env=int(e), job=int(job_of[e]), target_gap=int(gap_t[job_of[e]]), landed=int(landed[e]),
                                         strict=bool(ok[e]), plane_err_deg=round(float(rollout.nerr[e]), 2),
@@ -419,7 +647,6 @@ def main():
     if a.viewer and a.viewer_hold:
         while app.is_running():
             app.update()
-    import os
     os._exit(0)                                                  # (10/27) app.close() hung after the results were saved
 
 

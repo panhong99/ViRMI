@@ -682,6 +682,8 @@ def main():
     p.add_argument('--gt_replay', nargs='?', const='default', default=None, metavar='GT',
                    help='(보스 11/02, opt-in; with --inhand_check, taught plate) the 1st real success (tesollo/gt_inserts/, 11/02 '
                    'Q3 pin 6 L6/R6) moved along the row to this pin, same path and angles (tesollo/gt_replay.py); refused -> the taught insert')
+    p.add_argument('--gt_pitch_mm', type=float, default=None, help='(--gt_replay) pin spacing [mm] (보스 11/02 measured 20; '
+                   'default the basket model 17.4)')
     p.add_argument('--gt_dx_mm', type=float, default=0.0, help='(--gt_replay) + along the pin row (basket x)')
     p.add_argument('--gt_dy_mm', type=float, default=0.0, help='(--gt_replay) + toward the L row (basket y)')
     p.add_argument('--gt_dyaw_deg', type=float, default=0.0, help='(--gt_replay) plate turn about the vertical (+ = ccw from above)')
@@ -717,7 +719,8 @@ def main():
     if POLICY[0] and (not a.inhand_check or a.inhand_yaw):
         sys.exit('--policy_insert needs --inhand_check (and not --inhand_yaw)')
     GT_REPLAY[:] = [a.gt_replay, ['--dx_mm', str(a.gt_dx_mm), '--dy_mm', str(a.gt_dy_mm), '--dyaw_deg', str(a.gt_dyaw_deg),
-                                  '--dpitch_deg', str(a.gt_dpitch_deg)]]
+                                  '--dpitch_deg', str(a.gt_dpitch_deg)]
+                    + (['--pitch_mm', str(a.gt_pitch_mm)] if a.gt_pitch_mm else [])]
     if a.gt_replay and (not a.inhand_check or a.policy_insert or a.inhand_yaw):
         sys.exit('--gt_replay needs --inhand_check (and not --policy_insert / --inhand_yaw)')
     BY_ORDER[0] = a.plates_by_order

@@ -55,6 +55,8 @@ def main():
     a.add_argument('--dy_mm', type=float, default=0.0, help='+ = basket y (toward the L row)')
     a.add_argument('--dyaw_deg', type=float, default=0.0, help='turn about the vertical (+ = counter-clockwise from above)')
     a.add_argument('--dpitch_deg', type=float, default=0.0, help='turn about the basket y (the face leans more / less)')
+    a.add_argument('--pitch_mm', type=float, default=None, help='(보스 11/02 measured 20 mm) the pin spacing; default the basket '
+                   'model (17.4 mm)')
     a.add_argument('--max_step_deg', type=float, default=8.0, help='largest joint change between 2 mm knots')
     a = a.parse_args()
     t0 = time.time()
@@ -76,7 +78,10 @@ def main():
     gap, gap_gt = pp.pin_gap(Tbb, model_qd, a.pin), pp.pin_gap(Tg, pp.robot_quadrants(Tg)[a.quadrant], gt['pin'])
     H, _ = pi.measured_h(np.load(pi.JOB)['H_nom'], gt['inhand']['normal_flange'], F[-1], Tg)
     move = Tbb @ np.linalg.inv(Tg)                             # the basket since the GT
-    shift = Tbb[:3, :3] @ (gaps[gap] - gaps[gap_gt] + np.r_[a.dx_mm, a.dy_mm, 0.0] / 1000)
+    d_row = gaps[gap] - gaps[gap_gt]
+    if a.pitch_mm:                                             # the measured spacing instead of the model's
+        d_row = d_row * a.pitch_mm / 1000 / float(np.linalg.norm(gaps[1] - gaps[0]))
+    shift = Tbb[:3, :3] @ (d_row + np.r_[a.dx_mm, a.dy_mm, 0.0] / 1000)
     end = move @ F[-1]
     end[:3, 3] += shift
     _, piv_b = pi.lowest_rim(end, H, Tbb)                      # the turns' pivot: the plate bottom at the slot
@@ -124,6 +129,7 @@ def main():
     report = dict(time=time.strftime('%Y%m%d_%H%M%S'), gt=str(a.gt), quadrant=a.quadrant, pin=a.pin, gt_pin=gt['pin'], gap=int(gap),
                   shift_mm=(np.linalg.inv(Tbb)[:3, :3] @ shift * 1000).round(1).tolist(),
                   basket_moved_since_gt_mm=round(float(np.linalg.norm(move[:3, 3])) * 1000, 1),
+                  pitch_mm=a.pitch_mm or round(float(np.linalg.norm(gaps[1] - gaps[0])) * 1000, 1),
                   residual=dict(dx_mm=a.dx_mm, dy_mm=a.dy_mm, dyaw_deg=a.dyaw_deg, dpitch_deg=a.dpitch_deg),
                   rows_pred_LR=r_now, rows_pred_LR_minus_gt_pin_shift=[round(r_now[0] - r_gt[0] - (a.pin - gt['pin']), 2),
                                                                          round(r_now[1] - r_gt[1] - (a.pin - gt['pin']), 2)],

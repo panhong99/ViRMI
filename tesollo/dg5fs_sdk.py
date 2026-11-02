@@ -294,6 +294,30 @@ def stop_serve():
             p.terminate()
 
 
+def hand_connect_early(a):
+    """(--flow, 보스 11/02: ConnectToGripper took seconds after '-> connected') the DG-5F-S system setting + callbacks +
+    ConnectToGripper in a thread now, while the cameras look; no command to the hand.  main() joins it where it used to
+    connect -> {'g', 'thread', 'res'}."""
+    import threading
+    sys.path.insert(0, a.sdk)
+    from dgsdk import DGSDK, CommunicationMode, ControlMode, DGResult, GripperSystemSetting
+    g, res = DGSDK(), {}
+
+    def run():
+        t0 = time.time()
+        res['system'] = g.set_gripper_system(GripperSystemSetting.create(
+            ip=a.ip, port=a.port, control_mode=ControlMode.DEVELOPER, communication_mode=CommunicationMode.ETHERNET))
+        if res['system'] == DGResult.NONE:          # (10/27 real) the callbacks before the connect, or it segfaults
+            g.on_connected(lambda: print('  -> hand connected', flush=True))
+            g.on_disconnected(lambda: print('  -> disconnected', flush=True))
+            res['connect'] = g.connect_to_gripper()
+        res['dt'] = time.time() - t0
+
+    th = threading.Thread(target=run, daemon=True)
+    th.start()
+    return dict(g=g, thread=th, res=res)
+
+
 def run_leg(argv):
     """One mover leg (mover args) -> exit code: the kept mover (--flow) while it is up, else a new mover process.
     A kept mover that fails a leg stops the arm and ends; the next legs (e.g. the way home) use new processes."""
@@ -791,7 +815,7 @@ def main():
     p.add_argument('--inhand_check', action='store_true', help='(보스 10/30, opt-in) plate: stop at the lift top, the fixed '
                    'camera measures the plate in the hand (experiments/inhand/plate_inhand.py, read-only), then go on')
     p.add_argument('--flow', action='store_true', help='(보스 11/02, opt-in) fewer stops: one kept mover process for all arm '
-                   'legs (ros2_nodes.py mover --serve), the hand pre-pose while the arm approaches; with --gt_replay the GT insert planned before the lift, lift + carry as one leg (no in-hand check)')
+                   'legs (ros2_nodes.py mover --serve), the hand connected during the perception, the hand pre-pose while the arm approaches; with --gt_replay the GT insert planned before the lift, lift + carry as one leg (no in-hand check)')
     p.add_argument('--stepwise', action='store_true', help='(old) post-grasp legs as before: plate stops 1 cm over the slot '
                    'and inserts at --insert_vel, bowl stops above its quadrant; acc = vel')
     p.add_argument('--acc_ratio', type=float, default=0.5, help='arm acc [deg/s^2] = this x --vel (보스 10/29: softer starts / '
@@ -854,7 +878,9 @@ def main():
         DEMO_STATE.unlink(missing_ok=True)
     # (보스 10/29: slow start) basket, quadrants and the object at the same time (all read the view's shared frames;
     # the quadrants wait for the basket file); each loads its own YOLOE, so in a row they took ~20 s
-    seen = quad_proc = None
+    seen = quad_proc = early = None
+    if FLOW[0] and a.object:
+        early = hand_connect_early(a)
     if a.object == 'auto':
         seen = subprocess.Popen([str(PLAN_PY), str(REPO / 'tesollo/perceive.py')] + PERCEIVE_ARGS, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, text=True)
@@ -898,7 +924,7 @@ def main():
 
     # (10/27 real) ConnectToGripper segfaults unless the connected/disconnected callbacks are registered first (as the
     # vendor examples do); data is polled with get_gripper_data, no struct-by-value data callback
-    g = DGSDK()
+    g = early['g'] if early else DGSDK()
 
     def check(step, r):
         print(f'  {step}: {r.name}', flush=True)
@@ -927,11 +953,19 @@ def main():
         if input(f'\n{what}  Enter = go, q = stop: ').strip().lower() == 'q':
             raise KeyboardInterrupt
 
-    check('system', g.set_gripper_system(GripperSystemSetting.create(
-        ip=a.ip, port=a.port, control_mode=ControlMode.DEVELOPER, communication_mode=CommunicationMode.ETHERNET)))
-    g.on_connected(lambda: print('  -> connected', flush=True))
-    g.on_disconnected(lambda: print('  -> disconnected', flush=True))
-    check('connect', g.connect_to_gripper())
+    if early:                                           # (--flow) connected during the perception
+        t0 = time.time()
+        early['thread'].join()
+        r = early['res']
+        print(f'  hand connection: {r.get("dt", 0.0):.1f} s, waited {time.time() - t0:.1f} s here', flush=True)
+        check('system', r['system'])
+        check('connect', r['connect'])
+    else:
+        check('system', g.set_gripper_system(GripperSystemSetting.create(
+            ip=a.ip, port=a.port, control_mode=ControlMode.DEVELOPER, communication_mode=CommunicationMode.ETHERNET)))
+        g.on_connected(lambda: print('  -> connected', flush=True))
+        g.on_disconnected(lambda: print('  -> disconnected', flush=True))
+        check('connect', g.connect_to_gripper())
     started, grasped = False, None
     try:
         check('option', g.set_gripper_option(GripperSetting.create(

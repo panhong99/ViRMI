@@ -5862,3 +5862,4 @@ DockEnv opt-in을 더 넣어 P를 Isaac으로 쟀다(seed 51024, 1024개, 바구
 - 오프라인 확인: `rec_101200/005000.jpg`, pin 6 → L 8.28 / R 6.40, pair +1.89칸, raw −11.3°, 제한 −8.0°, conf 0.09. 오버레이 `outputs/side_cam_pair_20261102/offline_pin6_frame5000.png`.
 - 실시간 read-only GUI: PID 2520017, 시작 tick 61031638, 로그 `outputs/side_cam_pair_20261102/live.log`. 모든 gap은 회색 윤곽, 현재 선택 gap은 초록 `TARGET`, 실제 외곽선 교차점은 흰 `L/R CROSS`로 구분했다. 접시의 윗등 돌출은 판정에 쓰지 않고 두 빗살 줄 교차점만 쓴다. 현재 접시가 목표 band 근처에 없으면 `waiting for a plate`로 유지한다. 로봇·핸드·ROS 명령 없음.
 - 검증: `python -m py_compile experiments/side_cam/pair_view.py`; `calibration/tests.py` **109 tests / OK**(exit 0, `/tmp/side_pair_calibration_tests_20261102_rerun.log`).
+- 완료 커밋: `9a92aa2`.

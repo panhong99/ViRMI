@@ -154,6 +154,8 @@ TAUGHT_PIVOT = ['model']    # (--taught_pivot, 보스 10/30) taught_plan.py --pi
 INHAND = [False]
 INHAND_YAW = [False]        # (--inhand_yaw, 보스 10/30) and re-plan the insert with the measured yaw taken out (taught_plan --yaw_corr)            # (--inhand_check, 보스 10/30) plate: stop at the lift top, fixed camera measures the plate in the hand
 POLICY = [None]             # (--policy_insert [CKPT], 보스 10/31) the point-cloud docking RL corrects the taught insert (policy_insert.py)
+GT_REPLAY = [None, []]      # (--gt_replay [GT] + --gt_dx_mm ..., 보스 11/02) the 1st real success moved to this pin (gt_replay.py)
+BY_ORDER = [False]          # (--plates_by_order, 보스 11/02) plates: the remembered order only, plates seen by the camera ignored
 POLICY_EXTRA = []           # (--policy_yaw_trim / --policy_max_descent_mm, 11/02) passed on to policy_insert.py
 TEACH = [False]             # (--teach, 보스 10/29) plate: the plan stops above the basket, the insert is taught by the pendant
 CONTACT = REPO / 'tesollo/grasp_contact.json'   # finger joints at the end of the last grasp per object (the pre-close target)
@@ -221,10 +223,11 @@ def auto_targets(obj):
     # (보스 10/29) a plate seen in the basket is an obstacle like a remembered one: the next plate goes behind it
     # (11/02 real: plate 1 remembered at Q3 pin 6 was also seen ~3+ pins off -> counted twice, plate 2 went to Q4) a quadrant
     # with a remembered plate keeps the memory; seen pins count only where nothing is remembered (plates put in by hand)
-    placed = st['plates'] + [dict(q=q, pin=p_) for q, p_ in SEEN_PINS.items() if not any(r['q'] == q for r in st['plates'])]
+    placed = st['plates'] + [dict(q=q, pin=p_) for q, p_ in SEEN_PINS.items() if not any(r['q'] == q for r in st['plates'])
+                             and not BY_ORDER[0]]
     st = dict(st, plates=placed)
     plate_q = [p_['q'] for p_ in st['plates']]
-    full = {q for q, v in SEEN.items() if v and not (v == 'plate' and q in SEEN_PINS)} | set(st['bowls'])
+    full = {q for q, v in SEEN.items() if v and not (v == 'plate' and (q in SEEN_PINS or BY_ORDER[0]))} | set(st['bowls'])
     if obj == 'bowl':
         return [(q, 6, 'empty') for q in BOWL_QUADRANTS if q not in full and q not in plate_q]
     if plate_q and plate_q.count(plate_q[-1]) == 1:            # the 2nd plate: back of the 1st one's quadrant
@@ -349,7 +352,11 @@ def basket(obj, quadrant, pin, centre_h=None):
                 rest = inhand_replan(obj, quadrant, pin, meas, q_top, first)
                 if rest:
                     legs = legs[:i_leg + 1] + rest
-            if meas and POLICY[0]:
+            if GT_REPLAY[0] and q_top is not None:
+                rest = gt_replan(plan, quadrant, pin, q_top)
+                if rest:
+                    legs = legs[:i_leg + 1] + rest
+            elif meas and POLICY[0]:
                 rest = policy_replan(plan, quadrant, pin, meas, q_top)
                 if not rest and '--yaw_trim' in POLICY_EXTRA and TAUGHT_PIVOT[0] == 'slot':   # (11/02) refused: the
                     print('   policy refused -> the --inhand_yaw re-plan', flush=True)        # 10/30 yaw re-plan
@@ -423,6 +430,25 @@ def inhand_replan(obj, quadrant, pin, meas, q_top, first):
     BASKET['plan'] = m.group(1)
     print(f'   yaw {-yaw:+.1f} deg corrected (re-plan {time.time() - t0:.1f} s): {m.group(1)}', flush=True)
     return legs[1:]
+
+
+def gt_replan(plan_path, quadrant, pin, q_top):
+    """(--gt_replay, 보스 11/02) the GT insert (11/02 10:08 Q3 pin 6, L6/R6) moved to this pin + the hand-tuned residuals
+    (tesollo/gt_replay.py) -> the legs after the lift top, or None (refused: the planned legs go on unchanged)."""
+    t0 = time.time()
+    cmd = [str(PLAN_PY), str(REPO / 'tesollo/gt_replay.py'), '--plan', str(plan_path), '--quadrant', quadrant, '--pin', str(pin),
+           '--q_top'] + [str(v) for v in q_top] + (['--basket', BASKET_JSON[0]] if BASKET_JSON[0] else []) \
+        + (['--gt', GT_REPLAY[0]] if GT_REPLAY[0] != 'default' else []) + GT_REPLAY[1]
+    out = subprocess.run(cmd, capture_output=True, text=True, timeout=120, cwd=str(REPO))
+    m = re.search(r'^plan: (\S+)', out.stdout, re.M)
+    if out.returncode or not m:
+        print(f'   GT replay not used: {((out.stdout + out.stderr).strip().splitlines() or ["(no output)"])[-1][:220]}', flush=True)
+        return None
+    rep = json.loads(Path(m.group(1)).read_text()).get('gt_replay', {})
+    BASKET['plan'], BASKET['out_leg'] = m.group(1), 'policy_return'
+    print(f'   GT replay ({time.time() - t0:.1f} s): pin {rep.get("gt_pin")} -> {pin}, shift {rep.get("shift_mm")} mm, '
+          f'residual {rep.get("residual")}, rows L/R ~{rep.get("rows_pred_LR")}, max joint step {rep.get("max_joint_step_deg")} deg', flush=True)
+    return [(m.group(1), 'policy_carry'), (m.group(1), 'policy_insert')]
 
 
 def policy_replan(plan_path, quadrant, pin, meas, q_top):
@@ -649,6 +675,15 @@ def main():
                    help='(보스 10/31, opt-in; with --inhand_check, taught plate) the point-cloud docking RL (v11, or CKPT) '
                    'corrects the taught insert from the lift top (tesollo/policy_insert.py); refused -> the taught insert. '
                    'Use without --slot_dx / --slot_dy / --inhand_yaw (the policy aims at the gap itself)')
+    p.add_argument('--gt_replay', nargs='?', const='default', default=None, metavar='GT',
+                   help='(보스 11/02, opt-in; with --inhand_check, taught plate) the 1st real success (tesollo/gt_inserts/, 11/02 '
+                   'Q3 pin 6 L6/R6) moved along the row to this pin, same path and angles (tesollo/gt_replay.py); refused -> the taught insert')
+    p.add_argument('--gt_dx_mm', type=float, default=0.0, help='(--gt_replay) + along the pin row (basket x)')
+    p.add_argument('--gt_dy_mm', type=float, default=0.0, help='(--gt_replay) + toward the L row (basket y)')
+    p.add_argument('--gt_dyaw_deg', type=float, default=0.0, help='(--gt_replay) plate turn about the vertical (+ = ccw from above)')
+    p.add_argument('--gt_dpitch_deg', type=float, default=0.0, help='(--gt_replay) plate turn about the basket y')
+    p.add_argument('--plates_by_order', action='store_true', help='(보스 11/02, opt-in) plate targets from the remembered order '
+                   'only (1st front, 2nd back of it); plates the camera sees are ignored (reflections were seen as plates)')
     p.add_argument('--policy_yaw_trim', action='store_true', help='(11/02, opt-in; with --policy_insert) also take out the '
                    'in-hand yaw the policy leaves (real 11/02 L8/R6: ~5 deg left), accept a seat that only misses on the face angle, '
                    'and when the policy is refused use the --inhand_yaw re-plan instead of the uncorrected taught insert')
@@ -675,6 +710,11 @@ def main():
     POLICY[0] = a.policy_insert
     if POLICY[0] and (not a.inhand_check or a.inhand_yaw):
         sys.exit('--policy_insert needs --inhand_check (and not --inhand_yaw)')
+    GT_REPLAY[:] = [a.gt_replay, ['--dx_mm', str(a.gt_dx_mm), '--dy_mm', str(a.gt_dy_mm), '--dyaw_deg', str(a.gt_dyaw_deg),
+                                  '--dpitch_deg', str(a.gt_dpitch_deg)]]
+    if a.gt_replay and (not a.inhand_check or a.policy_insert or a.inhand_yaw):
+        sys.exit('--gt_replay needs --inhand_check (and not --policy_insert / --inhand_yaw)')
+    BY_ORDER[0] = a.plates_by_order
     POLICY_EXTRA[:] = (['--yaw_trim'] if a.policy_yaw_trim else []) \
         + (['--max_descent_mm', str(a.policy_max_descent_mm)] if a.policy_max_descent_mm is not None else [])
     ARM_APPROACH[:] = ['above', 'down'] if a.approach_stop else ARM_APPROACH

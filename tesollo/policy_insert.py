@@ -100,6 +100,33 @@ def measured_h(H_nom, normal_f, F_end, Tbb, centre_f=None):
     return H, float(np.degrees(ang))
 
 
+def follow_ik(k, targets, seed_deg, H):
+    """continuation IK, J4 as in seed_deg (10/30 --yaw_corr: a full IK flips J4 / J6 near J5 = 0); the plate is a disc, so
+    the centre (3) + the face normal (2) are the constraints and J1-J3, J5, J6 the unknowns -> (joints [deg] (N,6), None)
+    or (None, why)"""
+    from scipy.optimize import least_squares
+    qs_d = np.radians(np.asarray(seed_deg, float))
+    nz, c0 = H[:3, 2], H[:3, 3]
+    q = qs_d[0].copy()
+    Q = []
+    for i, T_ in enumerate(targets):
+        C = T_ @ H
+        q[3] = qs_d[i][3]
+
+        def res(x, j4=q[3]):
+            qq = np.r_[x[:3], j4, x[3:]]
+            G = k.fk(qq)
+            return np.r_[(G[:3, :3] @ c0 + G[:3, 3] - C[:3, 3]) * 100, (G[:3, :3] @ nz - C[:3, 2]) * 10]
+        sol = least_squares(res, np.r_[q[:3], q[4:]])
+        q = np.r_[sol.x[:3], q[3], sol.x[3:]]
+        r = res(sol.x)
+        if np.linalg.norm(r[:3]) > 0.1 or np.degrees(np.linalg.norm(r[3:]) / 10) > 0.5:
+            return None, (f'no IK with J4 as taught at knot {i} (centre off {np.linalg.norm(r[:3]) * 10:.1f} mm, '
+                          f'face off {np.degrees(np.linalg.norm(r[3:]) / 10):.1f} deg)')
+        Q.append(np.degrees(q))
+    return np.array(Q), None
+
+
 def end_yaw(T, H, Tbb):
     """the plate face's turn about the basket vertical [deg] at flange pose T (0 = square to the rows, as plate_inhand at_slot)"""
     nb = np.linalg.inv(Tbb)[:3, :3] @ T[:3, :3] @ H[:3, 2]
@@ -251,28 +278,11 @@ def main():
         sys.exit(2)
     # continuation IK, J4 as taught (10/30 --yaw_corr: a full IK flips J4 / J6 near J5 = 0); the plate is a disc, so the
     # centre (3) + the face normal (2) are the constraints and J1-J3, J5, J6 the unknowns
-    from scipy.optimize import least_squares
-    qs_d = np.radians(np.vstack([qs, np.repeat(qs[-1:], len(targets) - len(qs), 0)]))
-    nz, c0 = H[:3, 2], H[:3, 3]
-    q = qs_d[0].copy()
-    Q = []
-    for i, T_ in enumerate(targets):
-        C = T_ @ H
-        q[3] = qs_d[i][3]
-
-        def res(x, j4=q[3]):
-            qq = np.r_[x[:3], j4, x[3:]]
-            G = k.fk(qq)
-            return np.r_[(G[:3, :3] @ c0 + G[:3, 3] - C[:3, 3]) * 100, (G[:3, :3] @ nz - C[:3, 2]) * 10]
-        sol = least_squares(res, np.r_[q[:3], q[4:]])
-        q = np.r_[sol.x[:3], q[3], sol.x[3:]]
-        r = res(sol.x)
-        if np.linalg.norm(r[:3]) > 0.1 or np.degrees(np.linalg.norm(r[3:]) / 10) > 0.5:
-            print(f'REFUSED: no IK with J4 as taught at knot {i} (centre off {np.linalg.norm(r[:3]) * 10:.1f} mm, '
-                  f'face off {np.degrees(np.linalg.norm(r[3:]) / 10):.1f} deg)')
-            sys.exit(2)
-        Q.append(np.degrees(q))
-    Q = np.array(Q)
+    qs_d = np.vstack([qs, np.repeat(qs[-1:], len(targets) - len(qs), 0)])
+    Q, why = follow_ik(k, targets, qs_d, H)
+    if Q is None:
+        print(f'REFUSED: {why}')
+        sys.exit(2)
     if (Q < lo).any() or (Q > hi).any():
         print(f'REFUSED: outside the URDF joint limits (margin {min((Q - lo).min(), (hi - Q).min()):.1f} deg)')
         sys.exit(2)

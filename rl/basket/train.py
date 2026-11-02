@@ -537,7 +537,7 @@ def insert_reward(exact, seated, in_quadrant, landed, target, unseated_penalty=0
 
 
 FINAL_REPLAY_ARGS = ['--closed_loop', '--cl_top', '--cl_top_q', 'Q1:0', '--cl_iter', '2', '--cl_dx_q', 'Q1:0.025,Q2:0.038,Q3:-0.0464,Q4:-0.035',
-                     '--cl_lean_q', 'Q1:0.5,Q2:0,Q3:-0.5,Q4:0.5']   # = rl/basket/run_quadrant_final_20261015.sh
+                     '--cl_lean_q', 'Q1:0.5,Q2:0,Q3:-0.5,Q4:0.5']   # = rl/basket/replay_final.sh
 
 
 def code_snapshot(out):
@@ -574,7 +574,7 @@ def insert_replay(plans, out_dir, tag, policy_path, seed, det, per_run, extra, c
         cmd = ['env', '-u', 'CONDA_PREFIX', '-u', 'CONDA_DEFAULT_ENV', '/home/pan/IsaacLab/isaaclab.sh', '-p',
                str(code / 'rl/basket/expert.py'), 'replay', '--headless', *FINAL_REPLAY_ARGS, *io]
     else:
-        cmd = ['bash', str(ROOT / 'rl/basket/run_quadrant_final_20261015.sh'), io[1], io[3], *io[4:]]
+        cmd = ['bash', str(ROOT / 'rl/basket/replay_final.sh'), io[1], io[3], *io[4:]]
     cmd += (['--cl_policy_det'] if det else []) + extra
     for attempt in range(3):                                # (10/15 23:4x) Isaac sometimes crashes at start-up (kit getenv
         with open(out_dir / f'{tag}.log', 'w' if not attempt else 'a') as log:   # segfault, telemetry regex): retry

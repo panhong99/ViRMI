@@ -179,3 +179,21 @@ run_used.yml
 ros2_ws/install/
 ros2_ws/log/
 ros2_ws/build/
+
+# local data / runs / build envs (2026-11-02 cleanup; kept on disk, not in git)
+/.envs/
+/.codex_arch_build/
+/run.log
+/IL/data_*/
+/IL/basket_rl_starts_*/
+/rl/logs/
+/rl/reports/
+/rl/backups/
+/rl/archive/
+/calibration/archive/
+/outputs/*
+!/outputs/kimm_ai_award_20261027/
+/experiments/pyroki_bm/*.json
+*.ts
+/IL/data_slow_codex
+/IL/probe_radial_*/

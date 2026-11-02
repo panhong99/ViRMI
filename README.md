@@ -1,29 +1,56 @@
 # 식기 정리 로봇: 접시·그릇 → 식기 바구니 (D455 + YOLOE + Doosan M1013)
 
 테이블 위 접시·그릇을 고정 카메라로 찾아 잡고, 식기 바구니의 빈 칸(접시는 핀 사이 슬롯)에 넣습니다.
-엔드 이펙터가 둘이라 시연도 둘입니다.
+
+| 로봇 (6배속) | 관객 화면: target / obstacle (6배속) |
+|---|---|
+| ![demo robot](assets/videos/demo_robot.gif) | ![demo gui](assets/videos/demo_gui.gif) |
+
+2026-11-02 시연: 빨강 접시 → 4번 슬롯, 흰 접시 → 10번 슬롯. 그릇은 이미 바구니 안에 있어 장애물로 처리.
 
 | 시연 | 손 | 문서 |
 |---|---|---|
 | **A. 핸드 시연 (현재, 11/3 시연)** | Tesollo DG-5F-S 5지 핸드 | 아래 [A](#a-핸드-시연-tesollo-dg-5f-s) |
 | B. 그리퍼 파이프라인 (10/12) | Robotiq 2F-85 | 아래 [B](#b-그리퍼-파이프라인-robotiq-2f-85) |
 
+## 저장소 구조
+
+| 폴더 | 내용 |
+|---|---|
+| `tesollo/` | 핸드 시연 (인식 → 팔 → 손 → 바구니), 접시 삽입 경로 (티칭, GT 재생, 학습 정책) |
+| `calibration/` | 카메라·로봇·바구니 공용 코드, 그리퍼 파이프라인, 회귀 테스트(`tests.py`) |
+| `rl/` | Isaac Lab 시뮬과 학습: 점군 삽입 정책(`dock_env.py`, `dock_pc_train.py`), 바구니 BC/RL(`basket/`), 핸드 시뮬(`hand_basket.py`) |
+| `IL/` | 그리퍼 잡기 BC 데이터 수집 |
+| `experiments/` | 측면 카메라(`side_cam`), 슬롯 CNN(`slot_cnn`), 손 안 접시 측정(`inhand`), 계획기 비교(`pyroki_bm`, `curobo_bm`), YOLOE 확인(`yoloe`) |
+| `real_time_project/`, `ros2_ws/` | YOLOE + FoundationPose 실시간 6D 추정, ROS 2 포즈 브리지 |
+| `estimater.py`, `Utils.py`, `datareader.py`, `learning/`, `mycpp/` | FoundationPose 원본 코드 |
+| `collab/` | Claude·Codex 협업 기록 (`LOG.md`, `DECISIONS.md`, 지난 문서는 `archive/`) |
+| `assets/` | 그리퍼 모델, 시연 영상 |
+
+데이터(`calibration/data/`, `IL/data_*`, `rl/logs/`, `outputs/`)와 가중치는 git에 넣지 않습니다.
+
 ## A. 핸드 시연 (Tesollo DG-5F-S)
 
 ```text
 고정 D455 ─ 관객 화면(demo_watch: target / obstacle) ─ 공유 프레임 /dev/shm/fixed_latest.npz
-   ├ 바구니 위치 측정(basket_vision)  ├ 바구니 칸 상태(empty_quadrant: 그릇·꽂힌 접시)  └ 물체 종류·위치(perceive)
+   ├ 바구니 위치(고정값 tesollo/demo_safe/basket_fixed.json)  ├ 바구니 칸 상태(empty_quadrant)  └ 물체 종류·위치(perceive)
 팔 접근: 홈 → 물체 위 → 수직 하강 (스플라인 1개, arm_plan)
-손: 준비 자세 → 마지막 파지 자세 쪽으로 천천히 닫기 → 힘 파지 (한 동작)
-파지 후: 수직 30 cm 상승 → 바구니 빈 칸 위 → (접시) 슬롯 안 / (그릇) 칸 안 — 스플라인 1개, 고른 간격 경유점,
-        끝부분만 경유점을 촘촘히 해서 감속   (경로는 손이 닫히는 동안 미리 계산)
+손: 준비 자세 → 마지막 파지 자세 쪽으로 천천히 닫기 → 힘 파지
+파지 후: 30 cm 상승 → 고정 카메라로 손 안 접시 자세 측정(measure_held) → 바구니 위 → 슬롯 삽입
 놓기 → 손 모양 그대로 홈 복귀 → 손 펴기
 ```
 
-빈 칸 선택: 그릇은 아무 빈 칸(Q1, Q2, Q4, Q3 순), 접시는 1번째 앞쪽·2번째 뒤쪽(같은 칸). 오늘 넣은 것은
-`/tmp/tesollo_demo_state.json`에 기억하고, 카메라로 본 바구니 안 접시·그릇도 장애물로 칩니다.
-접시 삽입은 보스가 펜던트로 티칭한 자세(`tesollo/taught_inserts.json`: 바구니 위 / 슬롯 1 cm 위 / 슬롯 안)를
-측정한 바구니 위치·핀에 맞춰 옮겨 씁니다(손목 25° 덜 젖힘, 접시 바닥은 티칭 위치 유지).
+**접시 삽입 경로** (`--gt_replay`, 11/3 시연 방식): 실기 성공 1회(11/02 Q3 6번 슬롯, `tesollo/gt_inserts/`)를
+정답 경로로 삼아, 목표 슬롯까지 칸 간격(실측 20 mm)만큼 옮기고 작은 보정(yaw −6°, 빨강 x −10 mm / 흰 +25 mm)을
+접시 바닥 기준으로 더한 뒤 J4 고정 IK로 관절 경로를 만듭니다(`tesollo/gt_replay.py`).
+결과: 빨강 L4/R4(목표 4), 흰 L6/R7·L8/R9 등 목표 ±1칸. 남은 오차는 카메라로 안 보이는 파지 편차입니다.
+
+**학습 정책** (`--policy_insert`, 선택): Isaac에서 꽂힌 접시 점군을 목표로 학습한 PointNet PPO 정책을 손 안 측정 자세로
+시뮬 rollout하고 같은 IK로 실행합니다(`tesollo/policy_insert.py`, `rl/dock_pc_train.py`).
+물리 재생 성공률 P 제어기 43.9 % → 정책 81.2 %, 실기 Q3 6번 슬롯 L6/R6 성공.
+
+빈 칸 선택: 그릇은 아무 빈 칸, 접시는 순서대로 `--plate_pins`의 슬롯. 오늘 넣은 것은 `/tmp/tesollo_demo_state.json`에
+기억하고(`--new_demo`로 지움), 카메라로 본 바구니 안 접시·그릇은 장애물로 칩니다.
 
 ### A-1. 실행
 
@@ -31,10 +58,17 @@
 # 터미널 1: 로봇 연결 (계속 켜 둠) — 펜던트에서 PC로 제어권 이전 후
 bash ~/pan/6D_pose/calibration/run.sh connect
 
-# 터미널 2: 시연 (관객 화면이 같이 뜸; 물체를 보면 끝까지 자동)
-# 안전 시연(설정 고정, 바구니 측정 생략, 10/29 실기 동작): bash ~/pan/6D_pose/tesollo/demo_safe.sh [--new_demo]
-~/miniconda3/bin/python3 ~/pan/6D_pose/tesollo/dg5fs_sdk.py --object auto --vel 60
+# 터미널 2: 접시 2개 연속 (빨강 → 4번, 흰 → 10번). 접시마다 Enter, q = 멈춤
+bash ~/pan/6D_pose/tesollo/demo_plates.sh
+bash ~/pan/6D_pose/tesollo/demo_plates.sh --pins 3 9     # 다른 슬롯 (2번째 ≥ 1번째 + 3)
+bash ~/pan/6D_pose/tesollo/demo_plates.sh --only 2       # 2번째 접시만
+bash ~/pan/6D_pose/tesollo/demo_plates.sh --dry          # 명령만 출력
+
+# 한 번에 하나 (설정 고정 시연 스크립트, 옵션은 dg5fs_sdk.py로 전달)
+bash ~/pan/6D_pose/tesollo/demo_safe.sh [--new_demo] [옵션]
 ```
+
+시연 코드는 태그 `demo-20261103`으로 고정되어 있습니다.
 
 핸드: 왼손 `169.254.186.73`, DIP ② Developer 모드, DGManager와 ROS 핸드 드라이버는 꺼 둠(핸드는 클라이언트 1개만 받음).
 `~/miniconda3/bin/python3`(conda base, cffi 있음)로 실행하고, 계획 스크립트는 `foundationpose` 환경으로 자동 호출됩니다.
@@ -44,14 +78,16 @@ bash ~/pan/6D_pose/calibration/run.sh connect
 | `--object auto\|plate\|bowl` | 카메라로 고르기 / 고정 |
 | `--vel 60` | 팔 속도 °/s (= °/s²), `--insert_vel 40` 슬롯 삽입 구간 |
 | `--lift 0.30` | 파지 후 수직 상승 [m] |
+| `--inhand_check` | 파지 후 손 안 접시 자세 측정 (GT 재생·정책에 필요) |
+| `--gt_replay`, `--plate_pins N M`, `--gt_pitch_mm 20` | GT 재생 삽입, 접시 순서별 슬롯, 칸 간격 |
+| `--gt_dyaw_deg`, `--gt_dx_by_order A B` | GT 재생 보정: yaw, 접시 순서별 x [mm] |
+| `--plates_by_order` | 카메라 반사로 접시가 더 보여도 기억한 순서로 슬롯 선택 |
+| `--policy_insert`, `--policy_yaw_trim` | 학습 정책 삽입 (선택) |
 | `--grasp_ms 3000`, `--preclose` | 손 닫는 시간, 미리 닫는 비율(접시 0.7, 그릇 0.95) |
-| `--taught_wrist_less 25` | 티칭 삽입 자세보다 손목을 덜 젖히는 각도 |
 | `--new_demo` | 오늘 넣은 것 기억 지우기 (바구니를 비웠을 때) |
 | `--hold` / `--step` | 파지 후 멈춤 / 단계마다 Enter |
 | `--teach` | 바구니 위에서 멈추고 펜던트로 삽입 티칭, Enter마다 관절 기록 |
-| `--acc_ratio 0.5` | 가속도 = 속도 × 이 값 (출발·정지 부드럽게) |
-| `--stepwise` | 파지 후를 예전처럼 구간별로 (접시: 슬롯 1 cm 위 정지 후 40°/s 삽입, 그릇: 칸 위 정지), 가속도 = 속도 |
-| `--approach_stop`, `--preclose 0`, `--taught_wrist_less 0`, `--open_first` | 이전 동작으로 되돌리기 (디버깅용) |
+| `--stepwise` | 파지 후를 구간별로 (슬롯 1 cm 위 정지 후 삽입) |
 
 ### A-2. 따로 돌려 보기 (로봇 안 움직임, `~/pan/6D_pose`에서)
 
@@ -72,6 +108,10 @@ bash calibration/run.sh mover --plan <plan.json> --leg post_grasp --smooth --max
 | 파일 | 역할 |
 |---|---|
 | `tesollo/dg5fs_sdk.py` | 시연 진입점: 인식 → 팔 → 손 → 바구니 → 복귀 |
+| `tesollo/demo_plates.sh`, `demo_safe.sh` | 시연 실행 스크립트 (접시 2개 연속 / 1회) |
+| `tesollo/gt_replay.py`, `gt_inserts/` | 접시: 성공 1회 경로를 목표 슬롯으로 옮겨 재생 |
+| `tesollo/policy_insert.py` | 접시: 학습 정책 rollout → IK 경로 |
+| `tesollo/measure_held.py`, `read_posj.py` | 손 안 접시 자세 측정, 현재 관절 읽기 |
 | `tesollo/arm_plan.py`, `arm_poses.yaml` | 물체 위치에 맞춘 팔 접근/상승 경로 (티칭 파지 자세 기준) |
 | `tesollo/taught_plan.py`, `taught_inserts.json` | 접시: 티칭 삽입 경로를 바구니·핀에 맞춤 |
 | `tesollo/basket_plan.py` | 그릇: 바구니 칸 가운데로 / 접시: 계획기 경로(`--planner`) |

@@ -11,16 +11,16 @@ YOLOE 단독 multi-object detection 테스트 (RealSense D455)
 
 사용법:
     # prompt 모드 (기본): 지정한 클래스만 탐지
-    python checking_yoloe.py --source realsense --mode prompt --classes plate baseball "rubik's cube"
+    python experiments/yoloe/check_yoloe.py --source realsense --mode prompt --classes plate baseball "rubik's cube"
 
     # prompt-free 모드: 클래스 지정 없이 내장 vocab 전체 탐지
-    python checking_yoloe.py --source realsense --mode promptfree
+    python experiments/yoloe/check_yoloe.py --source realsense --mode promptfree
 
     # 정지 이미지로 테스트
-    python checking_yoloe.py --source test.jpg --mode prompt --classes plate
+    python experiments/yoloe/check_yoloe.py --source test.jpg --mode prompt --classes plate
 
     # 일반 웹캠(카메라 index)으로 테스트
-    python checking_yoloe.py --source 0
+    python experiments/yoloe/check_yoloe.py --source 0
 """
 
 import argparse

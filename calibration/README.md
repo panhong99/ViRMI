@@ -21,7 +21,6 @@
 | `tests.py` | conda | 하드웨어 없는 회귀 시험 21개 |
 | `run.sh` | bash | `connect`, `stream`, `viz`, `pipeline`, `mover`, `wrist_look`, `sim`, `tests` (환경 설정 포함) |
 | `data/` | – | 캘리브레이션 결과·샘플·계획(덮어쓰지 않음) |
-| `archive/` | – | 2026-10-06 정리 전 파일(실행하지 않음) |
 
 ## 실행 환경이 중요한 이유
 

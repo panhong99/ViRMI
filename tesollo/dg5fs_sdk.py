@@ -577,7 +577,8 @@ def arm_legs(obj, legs):
     """Fresh arm plan for the taught grasp pose (arm_plan.py), then the mover for these legs; True if all ran.
     The mover refuses a leg if the arm is not at its start, and asks for Enter before each leg."""
     out = subprocess.run([str(PLAN_PY), str(REPO / 'tesollo/arm_plan.py'), 'plate' if obj == 'plate' else 'bowl',
-                          '--dx', str(SHIFT[0]), '--dy', str(SHIFT[1])], capture_output=True, text=True)
+                          '--dx', str(SHIFT[0]), '--dy', str(SHIFT[1])]
+                         + (['--max_shift', PERCEIVE_ARGS[1]] if PERCEIVE_ARGS else []), capture_output=True, text=True)
     m = re.search(r'^plan: (\S+)', out.stdout, re.M)
     if out.returncode or not m:
         print(f'   arm plan failed:\n{out.stdout[-800:]}{out.stderr[-800:]}', flush=True)

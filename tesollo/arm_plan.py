@@ -19,9 +19,11 @@ ap.add_argument('obj', choices=('plate', 'bowl'))
 ap.add_argument('rise', type=float, nargs='?', default=0.12)
 ap.add_argument('--dx', type=float, default=0.0)
 ap.add_argument('--dy', type=float, default=0.0)
+ap.add_argument('--max_shift', type=float, default=0.15, help='(보스 11/02, opt-in larger) the object may move this far [m]')
 args = ap.parse_args()
 obj, rise = args.obj, args.rise
-assert np.hypot(args.dx, args.dy) <= 0.15, f'object moved {np.hypot(args.dx, args.dy) * 100:.1f} cm from the taught spot (> 15)'
+assert np.hypot(args.dx, args.dy) <= args.max_shift, \
+    f'object moved {np.hypot(args.dx, args.dy) * 100:.1f} cm from the taught spot (> {args.max_shift * 100:.0f})'
 A = yaml.safe_load((HERE / 'arm_poses.yaml').read_text())[obj]
 home = np.array(pp.C['robot']['home_joints_deg'])
 k = pp.Kinematics()

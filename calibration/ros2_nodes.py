@@ -20,6 +20,7 @@ mover     : executes one leg of a plan as single MoveJoint calls.  Safety (each 
             * an opening statement once, then `go` per waypoint (other input re-asks, q stops); Ctrl+C requests a quick stop;
               a controller refusal stops the sequence (never retried).  The physical E-stop / pendant has priority.
             Only ever started by the Human; the assistant does not run it against the robot.
+            `mover --serve` (opt-in, dg5fs_sdk.py --flow): the same smooth auto leg kept running, legs from stdin.
 viz       : the bringup's /dsr01/joint_states stays at 0 in this build, so RViz shows a straight robot.  viz reads the
             joints with get_current_posj (like flange) and draws, under the fixed frame base_link:
               real/*  the real robot (TF + /sixd/viz/robot_description) with a 2F-85 block, 10 Hz
@@ -769,6 +770,105 @@ def run_viz(a):
             rclpy.shutdown()
 
 
+def run_mover_serve(argv=None):
+    """(보스 11/02, opt-in: tesollo/dg5fs_sdk.py --flow) the smooth auto mover kept running: one ROS node and its service
+    connections for the whole run instead of a new process (ROS start + service waits) per leg.
+    stdin: one JSON list of `mover` args per line ('quit' ends); stdout: the usual leg report, then 'LEG_RESULT ok' or
+    'LEG_RESULT fail <why>'.  Only --execute --smooth --auto --opening_done legs without the force guard.  Every check of
+    the smooth mover runs per leg (plan, joint limits, steps, fresh joints vs the leg start, reach error after); any failure
+    or Ctrl+C requests a quick stop and ends the process - the caller does not retry."""
+    p = argparse.ArgumentParser(prog='ros2_nodes.py mover --serve')
+    p.add_argument('--serve', action='store_true')
+    p.add_argument('--robot_id', default='dsr01')
+    p.add_argument('--controller_ns', default='dsr_controller2')
+    sa = p.parse_args(argv)
+    import rclpy
+    from dsr_msgs2.srv import GetCurrentPosj, MoveSplineJoint, MoveStop
+    from std_msgs.msg import Float64MultiArray
+    rclpy.init()
+    node = rclpy.create_node('supervised_pendant_mover_serve')
+    prefix = service_prefix(sa.robot_id, sa.controller_ns)
+    get_posj = node.create_client(GetCurrentPosj, f'{prefix}/aux_control/get_current_posj')
+    move_spline = node.create_client(MoveSplineJoint, f'{prefix}/motion/move_spline_joint')
+    stop = node.create_client(MoveStop, f'{prefix}/motion/move_stop')
+    for client in (get_posj, move_spline, stop):
+        if not client.wait_for_service(timeout_sec=10.0):
+            sys.exit(f'service {client.srv_name} not available (bringup running? control granted to this PC?)')
+
+    def current():
+        res = call(rclpy, node, get_posj, GetCurrentPosj.Request(), 3.0)
+        if res is None or not res.success or len(res.pos) != 6:
+            raise RuntimeError('cannot read the current joints')
+        return np.array(res.pos, dtype=float)
+
+    def request_stop():
+        try:
+            req = MoveStop.Request()
+            req.stop_mode = 1                       # DR_QSTOP: quick stop (never starts a motion)
+            res = call(rclpy, node, stop, req, 2.0)
+            return bool(res is not None and res.success)
+        except Exception:
+            return False
+
+    def leg(argv):
+        args = mover_args(argv)
+        if not (args.execute and args.smooth and args.auto and args.opening_done) or args.tool_force_limit_n is not None \
+                or args.from_step != 1:
+            raise RuntimeError('--serve runs only --execute --smooth --auto --opening_done legs from step 1, no force guard')
+        plan = json.loads(args.plan.read_text())
+        wp, problems = validate(args, plan)
+        print_table(args, wp, plan)
+        if problems:
+            raise RuntimeError('REFUSED: ' + '; '.join(problems))
+        now = current()
+        err = np.abs(now - wp[0]).max()
+        if err > args.max_start_error_deg:
+            raise RuntimeError(f'REFUSED: robot is {err:.1f} deg from waypoint 0 (> {args.max_start_error_deg})')
+        targets = wp[1:]
+        if len(targets) > 100:
+            raise RuntimeError('REFUSED: movesj takes at most 100 waypoints')
+        req = MoveSplineJoint.Request()                                # as run_mover's smooth leg
+        req.pos = [Float64MultiArray(data=[float(v) for v in w]) for w in targets]
+        req.pos_cnt = len(targets)
+        req.vel, req.acc = [float(args.vel_deg_s)] * 6, [float(args.acc_deg_s2)] * 6
+        req.time, req.mode, req.sync_type = 0.0, 0, 0
+        seg = np.abs(np.diff(np.vstack([now, targets]), axis=0)).max(axis=1)
+        span = seg.sum()
+        if args.spline_time:
+            req.time = float(1.25 * len(seg) * seg.max() / args.vel_deg_s + 0.5)
+        print(f'\nspline: {len(targets)} waypoints, joint travel {span:.1f} deg, ~{span / args.vel_deg_s:.0f} s'
+              + (f', total time set {req.time:.1f} s' if req.time else '') + ' (kept mover)', flush=True)
+        t_move = time.time()
+        res = call(rclpy, node, move_spline, req, max(span / args.vel_deg_s, req.time) * 3 + 30)
+        if res is None or not res.success:
+            raise RuntimeError('controller did not accept / complete the spline')
+        reached = np.abs(current() - wp[-1]).max()
+        print(f'  reached in {time.time() - t_move:.1f} s, max joint error {reached:.2f} deg', flush=True)
+        if reached > args.max_reach_error_deg:
+            raise RuntimeError(f'STOP: reached pose is {reached:.2f} deg off the target (> {args.max_reach_error_deg})')
+
+    print('SERVE_READY', flush=True)
+    try:
+        for line in sys.stdin:
+            line = line.strip()
+            if line == 'quit':
+                break
+            if not line:
+                continue
+            try:
+                leg(json.loads(line))
+            except (Exception, SystemExit) as e:                    # mover_args exits on bad args
+                print(f'LEG_RESULT fail {e} (stop requested: {request_stop()})', flush=True)
+                break
+            print('LEG_RESULT ok', flush=True)
+    except KeyboardInterrupt:
+        print(f'LEG_RESULT fail interrupted (stop requested: {request_stop()})', flush=True)
+    finally:
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
+
 # ================================================================ main
 
 if __name__ == '__main__':
@@ -776,7 +876,10 @@ if __name__ == '__main__':
         sys.exit(__doc__)
     mode, rest = sys.argv[1], sys.argv[2:]
     if mode == 'mover':
-        run_mover(rest)
+        if '--serve' in rest:
+            run_mover_serve(rest)
+        else:
+            run_mover(rest)
         sys.exit(0)
     p = argparse.ArgumentParser(prog=f'ros2_nodes.py {mode}')
     if mode == 'flange':

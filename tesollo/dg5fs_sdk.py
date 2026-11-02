@@ -25,6 +25,7 @@ Needs the vendor Python SDK outside this repo (USB 2.Software/.../SampleProgram/
 --sdk) and cffi (conda base python has it; the ROS / foundationpose pythons do not).
 """
 import argparse
+import atexit
 import json
 import re
 import subprocess
@@ -157,8 +158,9 @@ INHAND_YAW = [False]        # (--inhand_yaw, 보스 10/30) and re-plan the inser
 POLICY = [None]             # (--policy_insert [CKPT], 보스 10/31) the point-cloud docking RL corrects the taught insert (policy_insert.py)
 GT_REPLAY = [None, []]      # (--gt_replay [GT] + --gt_dx_mm ..., 보스 11/02) the 1st real success moved to this pin (gt_replay.py)
 PLATE_PIN = [None]          # (--plate_pin N, 보스 11/02) plate: this pin of the first plate quadrant (Q3) instead of the auto choice
-FLOW = [False]              # (--flow, 보스 11/02, opt-in) fewer stops: the hand pre-pose while the arm approaches; with
+FLOW = [False]              # (--flow, 보스 11/02, opt-in) fewer stops: one kept mover, the hand pre-pose while the arm approaches; with
                             # --gt_replay the GT insert planned before the lift and lift + carry as one leg (no in-hand check)
+SERVE = {}                  # (--flow) the kept mover process (ros2_nodes.py mover --serve); cleared once it ends
 PLATE_PINS = []             # (--plate_pins N M, 보스 11/02) the same, by order: 1st plate today -> N, 2nd -> M (one command for both)
 GT_DX_ORDER = []            # (--gt_dx_by_order A B, 보스 11/02) --gt_dx_mm by order (red 1st, white 2nd)
 BY_ORDER = [False]          # (--plates_by_order, 보스 11/02) plates: the remembered order only, plates seen by the camera ignored
@@ -274,14 +276,70 @@ def auto_basket(obj, centre_h=None):
     print('   none of these planned; "basket Q.. pin" picks one by hand', flush=True)
 
 
+def start_serve():
+    """(--flow) the kept mover (ros2_nodes.py mover --serve) started now; it connects while the hand starts."""
+    SERVE['proc'] = subprocess.Popen(['bash', str(REPO / 'calibration/run.sh'), 'mover', '--serve'],
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
+    atexit.register(stop_serve)
+
+
+def stop_serve():
+    p = SERVE.pop('proc', None)
+    if p is not None and p.poll() is None:
+        try:
+            p.stdin.write('quit\n')
+            p.stdin.flush()
+            p.wait(timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            p.terminate()
+
+
+def run_leg(argv):
+    """One mover leg (mover args) -> exit code: the kept mover (--flow) while it is up, else a new mover process.
+    A kept mover that fails a leg stops the arm and ends; the next legs (e.g. the way home) use new processes."""
+    p = SERVE.get('proc')
+    if p is not None and not SERVE.get('ready'):
+        for line in p.stdout:                               # its start (service connections) before the 1st leg
+            if line.startswith('SERVE_READY'):
+                SERVE['ready'] = True
+                break
+            print(line, end='', flush=True)
+        else:
+            print(f'   kept mover did not start (exit {p.wait()}): a new mover per leg', flush=True)
+            SERVE.clear()
+            p = None
+    if p is None or p.poll() is not None:
+        SERVE.clear()
+        return subprocess.run(['bash', str(REPO / 'calibration/run.sh'), 'mover'] + argv).returncode
+    try:
+        p.stdin.write(json.dumps(argv) + '\n')
+        p.stdin.flush()
+    except OSError:                                         # it ended between two legs: nothing was sent
+        SERVE.clear()
+        return subprocess.run(['bash', str(REPO / 'calibration/run.sh'), 'mover'] + argv).returncode
+    try:
+        for line in p.stdout:
+            if line.startswith('LEG_RESULT'):
+                if line.split()[1] == 'ok':
+                    return 0
+                print(f'   kept mover: {line[11:].strip()}', flush=True)
+                break
+            print(line, end='', flush=True)
+    except KeyboardInterrupt:                               # Ctrl+C reaches it too: it quick-stops and ends
+        SERVE.clear()
+        raise
+    SERVE.clear()
+    return 1
+
+
 def mover(plan, leg, v, extra=()):
     """One mover leg (Enter to go); True if it ran."""
-    r = subprocess.run(['bash', str(REPO / 'calibration/run.sh'), 'mover', '--plan', plan, '--leg', leg, '--smooth',
-                        '--go_per', 'leg', '--vel_deg_s', str(v), '--acc_deg_s2', str(v * ACC[0]), '--execute', '--go_enter']
-                       + MOVER_GO + list(extra) + (['--spline_time'] if SMOOTH[0] else []))
-    if r.returncode:
-        print(f'   mover stopped at {leg} (exit {r.returncode})', flush=True)
-    return r.returncode == 0
+    code = run_leg(['--plan', plan, '--leg', leg, '--smooth', '--go_per', 'leg', '--vel_deg_s', str(v),
+                    '--acc_deg_s2', str(v * ACC[0]), '--execute', '--go_enter']
+                   + MOVER_GO + list(extra) + (['--spline_time'] if SMOOTH[0] else []))
+    if code:
+        print(f'   mover stopped at {leg} (exit {code})', flush=True)
+    return code == 0
 
 
 def plan_cmd(obj, quadrant, pin, centre_h=None):
@@ -606,11 +664,11 @@ def arm_legs(obj, legs):
     for leg in legs:
         v = VEL[0]
         name = f'{"plate" if obj == "plate" else "bowl"}_{leg}'
-        r = subprocess.run(['bash', str(REPO / 'calibration/run.sh'), 'mover', '--plan', m.group(1), '--leg', name,
-                            '--smooth', '--go_per', 'leg', '--vel_deg_s', str(v), '--acc_deg_s2', str(v * ACC[0]),
-                            '--execute', '--go_enter'] + MOVER_GO + (['--spline_time'] if SMOOTH[0] else []))
-        if r.returncode:
-            print(f'   mover stopped at {name} (exit {r.returncode})', flush=True)
+        code = run_leg(['--plan', m.group(1), '--leg', name, '--smooth', '--go_per', 'leg', '--vel_deg_s', str(v),
+                        '--acc_deg_s2', str(v * ACC[0]), '--execute', '--go_enter']
+                       + MOVER_GO + (['--spline_time'] if SMOOTH[0] else []))
+        if code:
+            print(f'   mover stopped at {name} (exit {code})', flush=True)
             return False
     return True
 
@@ -732,8 +790,8 @@ def main():
                    'extra descent after the path (sim: ~26 mm down to its floor) so the hand does not push the plate')
     p.add_argument('--inhand_check', action='store_true', help='(보스 10/30, opt-in) plate: stop at the lift top, the fixed '
                    'camera measures the plate in the hand (experiments/inhand/plate_inhand.py, read-only), then go on')
-    p.add_argument('--flow', action='store_true', help='(보스 11/02, opt-in) fewer stops: the hand pre-pose while the arm '
-                   'approaches; with --gt_replay the GT insert planned before the lift, lift + carry as one leg (no in-hand check)')
+    p.add_argument('--flow', action='store_true', help='(보스 11/02, opt-in) fewer stops: one kept mover process for all arm '
+                   'legs (ros2_nodes.py mover --serve), the hand pre-pose while the arm approaches; with --gt_replay the GT insert planned before the lift, lift + carry as one leg (no in-hand check)')
     p.add_argument('--stepwise', action='store_true', help='(old) post-grasp legs as before: plate stops 1 cm over the slot '
                    'and inserts at --insert_vel, bowl stops above its quadrant; acc = vel')
     p.add_argument('--acc_ratio', type=float, default=0.5, help='arm acc [deg/s^2] = this x --vel (보스 10/29: softer starts / '
@@ -775,6 +833,8 @@ def main():
         print(f'plate insert: taught #{TAUGHT_IX[0]} ({TAUGHT.name}), one spline after the grasp (--planner = the planner)', flush=True)
     GRIPPER[:] = [a.gripper_path, a.wrist]
     MOVER_GO[:] = [] if a.leg_enter else MOVER_GO
+    if FLOW[0] and a.object and not a.leg_enter:        # (--flow) one mover for all legs (its own prompts need --leg_enter)
+        start_serve()
     WRIST_LESS[0] = a.wrist_less
     SIM_CORR[0] = str(Path(a.sim_corr).resolve()) if a.sim_corr else ''
     held = basket_proc = None

@@ -5,9 +5,10 @@
 #   bash /home/pan/pan/6D_pose/tesollo/demo_all.sh                  # 1 bowl, then plates on pins 4, 10
 #   bash /home/pan/pan/6D_pose/tesollo/demo_all.sh --bowls 2        # 2 bowls first
 #   bash /home/pan/pan/6D_pose/tesollo/demo_all.sh --pins 3 9       # other pins
-#   bash /home/pan/pan/6D_pose/tesollo/demo_all.sh --quadrant Q4    # plates into Q4 (the Q3 GT moved across; Q3 must be empty)
+#   bash /home/pan/pan/6D_pose/tesollo/demo_all.sh --quadrant Q4    # plates into Q4 (the Q3 GT moved across; not the pin of a Q3 plate +-1)
 #   bash /home/pan/pan/6D_pose/tesollo/demo_all.sh --no_flow        # without --flow (the stop-and-go legs of demo_plates.sh)
-# --flow by default (11/03 보스): one kept mover, timed even-knot splines at --vel 60 (insert / descend as before), the hand
+# --vel 120 (보스 11/03 '120은 되야할듯'; the insert stays at --insert_vel 40; a later --vel N wins)
+# --flow by default (11/03 보스): one kept mover, timed even-knot splines at --vel (insert / descend as before), the hand
 # connected during the perception, GT planned before the lift.
 #   bash /home/pan/pan/6D_pose/tesollo/demo_all.sh --dry            # print the commands only
 # Anything else is passed on to dg5fs_sdk.py.  The basket memory is cleared once at the start (the 1st bowl's --new_demo).
@@ -35,7 +36,7 @@ PLATE=(--taught_pivot slot --inhand_check --gt_replay --gt_pitch_mm 20 --plates_
        --gt_dyaw_deg -6 --gt_dx_by_order -10 25 --plate_quadrant "$QD")   # = tesollo/demo_plates.sh COMMON + quadrant
 run() {   # $1 = label, rest = args
   local what="$1"; shift
-  local cmd=(bash "$REPO/tesollo/demo_safe.sh" "${FLOW[@]}" "$@" "${EXTRA[@]}")
+  local cmd=(bash "$REPO/tesollo/demo_safe.sh" --vel 120 "${FLOW[@]}" "$@" "${EXTRA[@]}")
   echo; echo "=== $what ==="; echo "${cmd[*]}"
   [ "$DRY" = 1 ] && return 0
   read -r -p "put it on the grasp spot, Enter = go, q = stop: " ans

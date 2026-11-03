@@ -858,7 +858,7 @@ def main():
     p.add_argument('--inhand_check', action='store_true', help='(보스 10/30, opt-in) plate: stop at the lift top, the fixed '
                    'camera measures the plate in the hand (experiments/inhand/plate_inhand.py, read-only), then go on')
     p.add_argument('--plate_quadrant', choices=('Q3', 'Q4'), default=None, help='(보스 11/03, opt-in; with --plate_pins '
-                   '--gt_replay) the plates\' quadrant; Q4 = the Q3 GT moved across (its carry crosses Q3 low: Q3 must be empty)')
+                   '--gt_replay) the plates\' quadrant; Q4 = the Q3 GT moved across (a Q3 plate at the same pin +-1 would touch it at the centre)')
     p.add_argument('--flow', action='store_true', help='(보스 11/02, opt-in) fewer stops: one kept mover process for all arm '
                    'legs (ros2_nodes.py mover --serve), even knots + --spline_time on every leg but the insert / descend, the hand connected during the perception, the hand pre-pose while the arm approaches; with --gt_replay the GT insert planned before the lift, lift + carry as one leg (no in-hand check)')
     p.add_argument('--stepwise', action='store_true', help='(old) post-grasp legs as before: plate stops 1 cm over the slot '

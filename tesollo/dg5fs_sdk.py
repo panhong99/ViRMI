@@ -27,6 +27,7 @@ Needs the vendor Python SDK outside this repo (USB 2.Software/.../SampleProgram/
 import argparse
 import atexit
 import json
+import math
 import re
 import subprocess
 import sys
@@ -172,6 +173,7 @@ SEEN_PINS = {}              # quadrant -> pin of a plate seen standing there at 
 SEEN = {}                   # quadrant -> 'bowl' / 'plate' / None, the fixed camera at the start of this run (empty_quadrant.py)
 BOWL_QUADRANTS = ('Q1', 'Q2', 'Q4', 'Q3')       # far ones first: Q3 / Q4 stay free for the plates
 PLATE_QUADRANTS = ('Q3', 'Q4')
+PLATE_Q = [None]            # (--plate_quadrant Q4, 보스 11/03) with --plate_pins: the plates' quadrant (GT replay moved there)
 PINS = 12                   # pins per Q3 / Q4 row; pin 1 = farthest from the robot
 # as pipeline.region_pins (min spacing 4 as the gripper demo).  The gripper's first pins (config Q4 front 3, back 10) do
 # not plan for the hand (10/29 live basket, --wrist_less 45: Q3 front 6, back 12-10; Q4 front 6 / 5, back 12 / 11 plan;
@@ -239,7 +241,7 @@ def auto_targets(obj):
     if obj == 'bowl':
         return [(q, 6, 'empty') for q in BOWL_QUADRANTS if q not in full and q not in plate_q]
     if PLATE_PIN[0] or PLATE_PINS:                             # (보스 11/02) the pin asked: the 1st plate's quadrant, else Q3
-        q = plate_q[-1] if plate_q else PLATE_QUADRANTS[0]
+        q = plate_q[-1] if plate_q else (PLATE_Q[0] or PLATE_QUADRANTS[0])
         n = len(load_state()['plates'])
         pin = PLATE_PIN[0] or PLATE_PINS[min(n, len(PLATE_PINS) - 1)]
         return [(q, pin, f'asked (plate {n + 1} today)')]
@@ -356,11 +358,37 @@ def run_leg(argv):
     return 1
 
 
+FLOW_KEEP = ('insert', 'policy_insert', 'descend')      # (--flow) legs into the basket keep their knots and timing
+
+
+def flow_even(plan, leg, step=3.0):
+    """(--flow) the leg's knots split so no joint turns more than `step` deg between two (every knot kept, the path the
+    same), saved as '<leg>_even' in the plan -> that leg name, run with --spline_time.  movesj without a total time ran
+    the --stepwise legs far slower than --vel (11/03 real: lift + carry + insert 15.1 s, ~2 s of joint travel at 60 deg/s);
+    --spline_time gives every knot the same time, so the knots must be near even."""
+    d = json.loads(Path(plan).read_text())
+    W = d['legs'][leg]['waypoints_deg']
+    while True:
+        out = [list(W[0])]
+        for a_, b_ in zip(W, W[1:]):
+            n = max(1, math.ceil(max(abs(y - x) for x, y in zip(a_, b_)) / step))
+            out += [[x + (y - x) * k / n for x, y in zip(a_, b_)] for k in range(1, n + 1)]
+        if len(out) <= 100:                             # movesj takes at most 100 knots
+            break
+        step *= 1.5
+    d['legs'][leg + '_even'] = dict(d['legs'][leg], waypoints_deg=out)
+    Path(plan).write_text(json.dumps(d, indent=1))
+    return leg + '_even'
+
+
 def mover(plan, leg, v, extra=()):
     """One mover leg (Enter to go); True if it ran."""
+    even = FLOW[0] and leg not in FLOW_KEEP
+    if even:
+        leg = flow_even(plan, leg)
     code = run_leg(['--plan', plan, '--leg', leg, '--smooth', '--go_per', 'leg', '--vel_deg_s', str(v),
                     '--acc_deg_s2', str(v * ACC[0]), '--execute', '--go_enter']
-                   + MOVER_GO + list(extra) + (['--spline_time'] if SMOOTH[0] else []))
+                   + MOVER_GO + list(extra) + (['--spline_time'] if SMOOTH[0] or even else []))
     if code:
         print(f'   mover stopped at {leg} (exit {code})', flush=True)
     return code == 0
@@ -370,7 +398,9 @@ def plan_cmd(obj, quadrant, pin, centre_h=None):
     """The basket plan command: plate = the pendant-taught insert (taught_plan.py) or the planner; bowl = the planner."""
     if TAUGHT_IX[0] is not None and obj == 'plate':      # (보스 10/29) the pendant-taught insert, one sparse spline after
         return ([str(PLAN_PY), str(REPO / 'tesollo/taught_plan.py'), '--index', str(TAUGHT_IX[0]),    # the grasp
-                 '--quadrant', quadrant, '--pin', str(pin), '--dx', str(SHIFT[0]), '--dy', str(SHIFT[1]),
+                 # (11/03) only Q3 is taught: another quadrant takes the Q3 plan as the template the GT replay moves
+                 '--quadrant', quadrant if not (GT_REPLAY[0] and quadrant != 'Q3') else 'Q3', '--pin', str(pin),
+                 '--dx', str(SHIFT[0]), '--dy', str(SHIFT[1]),
                  '--rise', str(LIFT_M[0]), '--wrist_less', str(TAUGHT_LESS[0]), '--pivot', TAUGHT_PIVOT[0],
                  '--slot_dx', str(SLOT_SHIFT[0]), '--slot_dy', str(SLOT_SHIFT[1])]
                 + (['--smooth'] if SMOOTH[0] else [])
@@ -430,10 +460,17 @@ def basket(obj, quadrant, pin, centre_h=None):
     if TEACH[0] and obj == 'plate' and TAUGHT_IX[0] is None:   # (보스 10/29) only up to above the basket; the pendant inserts
         legs = [(teach_stop(m.group(1), mg.group(1) if mg else None), 'lift_carry')]
     q_top, first = None, legs[0][1]
+    cross = obj == 'plate' and GT_REPLAY[0] and TAUGHT_IX[0] is not None and quadrant != 'Q3'   # the Q3 plan as template
     if INHAND[0] and obj == 'plate':
         legs, q_top = inhand_split(legs)
+        if cross and q_top is None:          # (11/03) no lift top -> no GT replay; the Q3 template must not run
+            print(f'   no lift top in the plan: {quadrant} not planned (the plate is held)', flush=True)
+            return False
         if FLOW[0] and GT_REPLAY[0] and q_top is not None:
             legs = flow_legs(legs, quadrant, pin, q_top) or legs
+            if cross and legs[0][1] != 'flow_carry':   # the Q3 template must not run into Q3
+                print(f'   GT replay refused for {quadrant}: stopped before the lift (the plate is held)', flush=True)
+                return False
     i_leg = 0
     while i_leg < len(legs):
         plan, leg = legs[i_leg]
@@ -451,6 +488,9 @@ def basket(obj, quadrant, pin, centre_h=None):
                 rest = gt_replan(plan, quadrant, pin, q_top)
                 if rest:
                     legs = legs[:i_leg + 1] + rest
+                elif cross:                                      # the Q3 template must not run into Q3
+                    print(f'   GT replay refused for {quadrant}: stopped at the lift top (the plate is held)', flush=True)
+                    return False
             elif meas and POLICY[0]:
                 rest = policy_replan(plan, quadrant, pin, meas, q_top)
                 if not rest and '--yaw_trim' in POLICY_EXTRA and TAUGHT_PIVOT[0] == 'slot':   # (11/02) refused: the
@@ -550,6 +590,7 @@ def gt_replan(plan_path, quadrant, pin, q_top):
     cmd = [str(PLAN_PY), str(REPO / 'tesollo/gt_replay.py'), '--plan', str(plan_path), '--quadrant', quadrant, '--pin', str(pin),
            '--q_top'] + [str(v) for v in q_top] + (['--basket', BASKET_JSON[0]] if BASKET_JSON[0] else []) \
         + (['--gt', GT_REPLAY[0]] if GT_REPLAY[0] != 'default' else []) + GT_REPLAY[1] \
+        + (['--cross_quadrant'] if quadrant != 'Q3' else []) \
         + (['--dx_mm', str(GT_DX_ORDER[min(len(load_state()['plates']), len(GT_DX_ORDER) - 1)])] if GT_DX_ORDER else [])
     out = subprocess.run(cmd, capture_output=True, text=True, timeout=120, cwd=str(REPO))
     m = re.search(r'^plan: (\S+)', out.stdout, re.M)
@@ -688,9 +729,11 @@ def arm_legs(obj, legs):
     for leg in legs:
         v = VEL[0]
         name = f'{"plate" if obj == "plate" else "bowl"}_{leg}'
+        if FLOW[0]:
+            name = flow_even(m.group(1), name)
         code = run_leg(['--plan', m.group(1), '--leg', name, '--smooth', '--go_per', 'leg', '--vel_deg_s', str(v),
                         '--acc_deg_s2', str(v * ACC[0]), '--execute', '--go_enter']
-                       + MOVER_GO + (['--spline_time'] if SMOOTH[0] else []))
+                       + MOVER_GO + (['--spline_time'] if SMOOTH[0] or FLOW[0] else []))
         if code:
             print(f'   mover stopped at {name} (exit {code})', flush=True)
             return False
@@ -814,8 +857,10 @@ def main():
                    'extra descent after the path (sim: ~26 mm down to its floor) so the hand does not push the plate')
     p.add_argument('--inhand_check', action='store_true', help='(보스 10/30, opt-in) plate: stop at the lift top, the fixed '
                    'camera measures the plate in the hand (experiments/inhand/plate_inhand.py, read-only), then go on')
+    p.add_argument('--plate_quadrant', choices=('Q3', 'Q4'), default=None, help='(보스 11/03, opt-in; with --plate_pins '
+                   '--gt_replay) the plates\' quadrant; Q4 = the Q3 GT moved across (its carry crosses Q3 low: Q3 must be empty)')
     p.add_argument('--flow', action='store_true', help='(보스 11/02, opt-in) fewer stops: one kept mover process for all arm '
-                   'legs (ros2_nodes.py mover --serve), the hand connected during the perception, the hand pre-pose while the arm approaches; with --gt_replay the GT insert planned before the lift, lift + carry as one leg (no in-hand check)')
+                   'legs (ros2_nodes.py mover --serve), even knots + --spline_time on every leg but the insert / descend, the hand connected during the perception, the hand pre-pose while the arm approaches; with --gt_replay the GT insert planned before the lift, lift + carry as one leg (no in-hand check)')
     p.add_argument('--stepwise', action='store_true', help='(old) post-grasp legs as before: plate stops 1 cm over the slot '
                    'and inserts at --insert_vel, bowl stops above its quadrant; acc = vel')
     p.add_argument('--acc_ratio', type=float, default=0.5, help='arm acc [deg/s^2] = this x --vel (보스 10/29: softer starts / '
@@ -844,6 +889,9 @@ def main():
     BY_ORDER[0] = a.plates_by_order
     PLATE_PIN[0] = a.plate_pin
     PLATE_PINS[:] = a.plate_pins
+    PLATE_Q[0] = a.plate_quadrant
+    if a.plate_quadrant == 'Q4' and not (a.gt_replay and a.plate_pins):
+        sys.exit('--plate_quadrant Q4 needs --gt_replay and --plate_pins (only Q3 is taught)')
     PERCEIVE_ARGS[:] = ['--radius', str(a.perceive_radius)] if a.perceive_radius else []
     GT_DX_ORDER[:] = a.gt_dx_by_order
     POLICY_EXTRA[:] = (['--yaw_trim'] if a.policy_yaw_trim else []) \

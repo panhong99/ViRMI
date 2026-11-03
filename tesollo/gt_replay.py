@@ -55,6 +55,8 @@ def main():
     a.add_argument('--dy_mm', type=float, default=0.0, help='+ = basket y (toward the L row)')
     a.add_argument('--dyaw_deg', type=float, default=0.0, help='turn about the vertical (+ = counter-clockwise from above)')
     a.add_argument('--dpitch_deg', type=float, default=0.0, help='turn about the basket y (the face leans more / less)')
+    a.add_argument('--cross_quadrant', action='store_true', help='(보스 11/03, opt-in) another quadrant than the GT\'s: the '
+                   'path moved by the model\'s gap offset (the same pin row direction, e.g. Q3 -> Q4: the other pin pair)')
     a.add_argument('--pitch_mm', type=float, default=None, help='(보스 11/02 measured 20 mm) the pin spacing; default the basket '
                    'model (17.4 mm)')
     a.add_argument('--max_step_deg', type=float, default=8.0, help='largest joint change between 2 mm knots')
@@ -63,8 +65,8 @@ def main():
     k = pp.Kinematics()
     lo, hi = np.array(k.limits_deg()).T
     gt = json.loads(Path(a.gt).read_text())
-    if gt['quadrant'] != a.quadrant:
-        print(f'REFUSED: the GT is {gt["quadrant"]} (asked {a.quadrant})')
+    if gt['quadrant'] != a.quadrant and not a.cross_quadrant:
+        print(f'REFUSED: the GT is {gt["quadrant"]} (asked {a.quadrant}; --cross_quadrant moves it there)')
         sys.exit(2)
     plan = json.loads(Path(a.plan).read_text())
     carry_gt, ins_gt = gt['legs']['policy_carry'][1:], gt['legs']['policy_insert']
@@ -74,13 +76,14 @@ def main():
     Tg, Tbb = np.array(gt['basket_T']), np.array(json.loads(Path(a.basket).read_text())['T'])
     model_qd = pp.robot_quadrants(Tbb)[a.quadrant]
     gaps = np.array(pp.basket_gaps()[model_qd])
+    gaps_gt = np.array(pp.basket_gaps()[pp.robot_quadrants(Tg)[gt['quadrant']]])
     away = (Tbb[:3, 0] @ np.r_[Tbb[:2, 3], 0.0]) >= 0
-    gap, gap_gt = pp.pin_gap(Tbb, model_qd, a.pin), pp.pin_gap(Tg, pp.robot_quadrants(Tg)[a.quadrant], gt['pin'])
+    gap, gap_gt = pp.pin_gap(Tbb, model_qd, a.pin), pp.pin_gap(Tg, pp.robot_quadrants(Tg)[gt['quadrant']], gt['pin'])
     H, _ = pi.measured_h(np.load(pi.JOB)['H_nom'], gt['inhand']['normal_flange'], F[-1], Tg)
     move = Tbb @ np.linalg.inv(Tg)                             # the basket since the GT
-    d_row = gaps[gap] - gaps[gap_gt]
-    if a.pitch_mm:                                             # the measured spacing instead of the model's
-        d_row = d_row * a.pitch_mm / 1000 / float(np.linalg.norm(gaps[1] - gaps[0]))
+    d_row = gaps[gap] - gaps_gt[gap_gt]                        # (--cross_quadrant, 11/03) + the other pin pair across y
+    if a.pitch_mm:                                             # the measured spacing instead of the model's (along the row)
+        d_row[0] *= a.pitch_mm / 1000 / float(np.linalg.norm(gaps[1] - gaps[0]))
     shift = Tbb[:3, :3] @ (d_row + np.r_[a.dx_mm, a.dy_mm, 0.0] / 1000)
     end = move @ F[-1]
     end[:3, 3] += shift
@@ -125,7 +128,7 @@ def main():
     legs['policy_insert'] = dict(legs['insert'], waypoints_deg=ins, planner=src)
     legs['policy_return'] = dict(legs['return_home'], waypoints_deg=back, planner=src + ' reversed')
     Fe, Fe_gt = k.fk(np.radians(Q[-1])), k.fk(np.radians(W[-1]))
-    r_now, r_gt = rows(Fe, H, Tbb, gaps, away), rows(Fe_gt, H, Tg, gaps, away)
+    r_now, r_gt = rows(Fe, H, Tbb, gaps, away), rows(Fe_gt, H, Tg, gaps_gt, away)
     report = dict(time=time.strftime('%Y%m%d_%H%M%S'), gt=str(a.gt), quadrant=a.quadrant, pin=a.pin, gt_pin=gt['pin'], gap=int(gap),
                   shift_mm=(np.linalg.inv(Tbb)[:3, :3] @ shift * 1000).round(1).tolist(),
                   basket_moved_since_gt_mm=round(float(np.linalg.norm(move[:3, 3])) * 1000, 1),

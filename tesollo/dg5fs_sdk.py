@@ -241,8 +241,11 @@ def auto_targets(obj):
     if obj == 'bowl':
         return [(q, 6, 'empty') for q in BOWL_QUADRANTS if q not in full and q not in plate_q]
     if PLATE_PIN[0] or PLATE_PINS:                             # (보스 11/02) the pin asked: the 1st plate's quadrant, else Q3
-        q = plate_q[-1] if plate_q else (PLATE_Q[0] or PLATE_QUADRANTS[0])
+        q = plate_q[-1] if plate_q else PLATE_QUADRANTS[0]
         n = len(load_state()['plates'])
+        if PLATE_Q[0]:                     # (11/03 real: Q4 asked, plates remembered in Q3 -> it went into Q3) the asked
+            q = PLATE_Q[0]                 # quadrant always; the order counts the plates already in it
+            n = sum(p_['q'] == q for p_ in load_state()['plates'])
         pin = PLATE_PIN[0] or PLATE_PINS[min(n, len(PLATE_PINS) - 1)]
         return [(q, pin, f'asked (plate {n + 1} today)')]
     if plate_q and plate_q.count(plate_q[-1]) == 1:            # the 2nd plate: back of the 1st one's quadrant
@@ -583,6 +586,12 @@ def inhand_replan(obj, quadrant, pin, meas, q_top, first):
     return legs[1:]
 
 
+def plates_before(quadrant):
+    """plates remembered today (--plate_quadrant: only those in that quadrant) -> the order index of this plate"""
+    plates = load_state()['plates']
+    return sum(p_['q'] == quadrant for p_ in plates) if PLATE_Q[0] else len(plates)
+
+
 def gt_replan(plan_path, quadrant, pin, q_top):
     """(--gt_replay, 보스 11/02) the GT insert (11/02 10:08 Q3 pin 6, L6/R6) moved to this pin + the hand-tuned residuals
     (tesollo/gt_replay.py) -> the legs after the lift top, or None (refused: the planned legs go on unchanged)."""
@@ -591,7 +600,7 @@ def gt_replan(plan_path, quadrant, pin, q_top):
            '--q_top'] + [str(v) for v in q_top] + (['--basket', BASKET_JSON[0]] if BASKET_JSON[0] else []) \
         + (['--gt', GT_REPLAY[0]] if GT_REPLAY[0] != 'default' else []) + GT_REPLAY[1] \
         + (['--cross_quadrant'] if quadrant != 'Q3' else []) \
-        + (['--dx_mm', str(GT_DX_ORDER[min(len(load_state()['plates']), len(GT_DX_ORDER) - 1)])] if GT_DX_ORDER else [])
+        + (['--dx_mm', str(GT_DX_ORDER[min(plates_before(quadrant), len(GT_DX_ORDER) - 1)])] if GT_DX_ORDER else [])
     out = subprocess.run(cmd, capture_output=True, text=True, timeout=120, cwd=str(REPO))
     m = re.search(r'^plan: (\S+)', out.stdout, re.M)
     if out.returncode or not m:

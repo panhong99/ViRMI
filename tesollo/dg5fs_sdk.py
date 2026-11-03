@@ -43,6 +43,7 @@ ARM_APPROACH = ['approach']    # (보스 10/29) home -> above -> down as one spl
 ARM_HOME = ('lift', 'home')
 VEL = [60.0]                # arm deg/s = deg/s^2 for every leg (보스 10/29: sparse demo at 60; --vel)
 APPROACH_HAND = {'plate': 'open', 'bowl': 'bowl_grasp30'}
+REST = ['open']             # (보스 11/03 wrist camera) the hand's rest pose: plate approach + after the release (--rest_pose)
 BASKET_LEGS = ('lift', 'to_above', 'descend')     # fallback when lift + to_above cannot be merged into one spline
 DGM_CONFIG = Path.home() / '.config/DGManager/config.json'
 JOINTS = 20
@@ -827,6 +828,8 @@ def main():
                    'more than 30)')
     p.add_argument('--taught_wrist_less', type=float, default=25.0, help='(taught plate insert) the wrist this much less '
                    'leaned back than taught, plate bottom kept on the slot [deg] (보스 10/29: 25; 0 = as taught)')
+    p.add_argument('--rest_pose', default='open', help='(보스 11/03 wrist camera) hand rest pose instead of all 0: the plate '
+                   'approach and the open after the release (poses.yaml name, open, or dgm:N, e.g. dgm:11)')
     p.add_argument('--open_first', action='store_true', help='(old) open the hand in the basket before the arm goes home '
                    '(default: release, arm home, then open - 보스 10/29)')
     p.add_argument('--taught_pivot', choices=('model', 'slot'), default='model', help='(보스 10/30, opt-in slot) the taught '
@@ -909,6 +912,9 @@ def main():
     TEACH[0] = a.teach
     INSERT_VEL[0] = a.insert_vel
     AUTO[0] = not (a.step or a.teach or a.hold or not a.object)
+    REST[0] = a.rest_pose
+    load_pose(REST[0])                                  # a bad name stops here, before anything moves
+    APPROACH_HAND['plate'] = REST[0]
     TAUGHT_IX[0] = a.taught if a.taught is not None else (None if a.planner or not TAUGHT.exists() else -1)
     if a.object in ('plate', 'auto') and TAUGHT_IX[0] is not None:
         print(f'plate insert: taught #{TAUGHT_IX[0]} ({TAUGHT.name}), one spline after the grasp (--planner = the planner)', flush=True)
@@ -1170,8 +1176,8 @@ def main():
 
             def open_hand():
                 try:
-                    if AUTO[0] or input('\n4. open the hand (all 0)?  Enter = go, n = leave it: ').strip().lower() != 'n':
-                        g.move_joint_all([0.0] * JOINTS)
+                    if AUTO[0] or input(f'\n4. open the hand ({REST[0]})?  Enter = go, n = leave it: ').strip().lower() != 'n':
+                        g.move_joint_all(load_pose(REST[0]))
                         time.sleep(a.motion_ms / 1000 + 0.5)
                         show()
                 except EOFError:
